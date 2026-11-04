@@ -24,7 +24,17 @@ uv run --locked python main.py --list-devices
 uv run --locked python ui.py
 ```
 
-Choose BlackHole capture and your headphone output, then press **Start**. The UI does not play TTS. The Vietnamese panel is above English, with the newest completed translation first. An English live line changes as overlapping Whisper windows decode; a word prefix repeated in consecutive windows is marked stable. After at least four meaningful stable words, a small fragment can start a **Vietnamese draft** while speech continues. The draft streams in place. A correction invalidates the affected fragment and later fragments; a speech pause or seven-second limit submits any remaining English and finalizes the line once all fragments finish. **Stop** ends capture; restore your normal macOS output manually when done.
+The desktop app provides two complementary modes:
+
+### Tab 1: Live Translation (Trực tiếp)
+Follow English meetings with progressive, low-latency Vietnamese subtitles. System audio captured via BlackHole 2ch decodes through local MLX Whisper Small.en and streams through local Ollama TranslateGemma 4B. A dedicated Live Focus Card displays recent thought-unit context, real-time Vietnamese previews, and matching live English.
+
+### Tab 2: Meeting Copilot (Trợ lý cuộc họp)
+When participating in technical discussions, click **Help Me Reply**, **Explain Context**, or **Suggest Question** to generate concise, natural English spoken replies (1–3 sentences), complete with Vietnamese explanation and verified citations:
+- **Meeting Context**: In-memory `MeetingContextStore` tracks finalized transcript segments (`[T#id]`).
+- **Knowledge Base**: Load Markdown (`.md`) and text (`.txt`) files or project documentation directories indexed locally in RAM via SQLite FTS5 (`[DOC#id]`).
+- **Claude Haiku 5.5**: Streams answers on explicit user click using Anthropic API (`claude-haiku-5-5` / `claude-3-5-haiku-20241022`).
+- **Privacy & Security**: Cloud assistance requires explicit opt-in. Only ~3 minutes of recent context and relevant excerpts are transmitted on request; transcripts are never written to disk. The translator remains 100% operational offline without API keys.
 
 The first-VI metric now means the first **visible draft token**. Its latency must be evaluated together with draft accuracy and the final-VI metric; it is not directly comparable with an earlier policy that waited for stable English before requesting translation.
 

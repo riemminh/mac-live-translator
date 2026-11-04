@@ -5,27 +5,27 @@
 **Language:** Vietnamese. **Version:** 1.0 — 2026-11-04.  
 **Engineering principle:** **Simple → Correct → Maintainable → Optimize when needed**.
 
-> The user wants a universal macOS audio-translation layer. When enabled, English speech played by YouTube, Facebook, Google Meet, Zoom, or other software through the selected system audio path should be captured locally, transcribed, translated to Vietnamese, synthesized into Vietnamese voice, and heard **through the user's own headphones**, instead of the original English. The user does **not** primarily want subtitles. No meeting memory or AI answer suggestions yet.
+> The user wants a universal macOS audio-translation layer and meeting copilot. When enabled, English speech played by YouTube, Google Meet, Zoom, or other software through the selected system audio path is captured locally, transcribed, translated to Vietnamese, and displayed progressively. An integrated on-demand Meeting Copilot leverages in-memory meeting context and local Markdown/TXT documentation to help the user speak natural English responses via Claude Haiku 5.5.
 
 ## 1. Product goal
 
-**User story:** “I switch on a local Mac app, play an English video or join a 5-person English-language meeting, and hear spoken Vietnamese in my headphones without adding a meeting bot, installing browser extensions, manually uploading recordings, or relying on paid cloud APIs.”
+**User story:** “I switch on a local Mac app, join an English-language technical meeting, follow Vietnamese live captions in real time, and when asked a question, click 'Help Me Reply' to get 1–3 clear English sentences grounded in our docs and transcript that I can immediately speak aloud.”
 
-### In scope for MVP
+### In scope (Hybrid Architecture)
 
-1. Capture the **combined system output audio** routed to BlackHole 2ch; no per-app integrations.
-2. English speech recognition (ASR) using local Whisper on Apple Silicon.
-3. English → Vietnamese text translation using a local model via Ollama.
-4. Vietnamese text-to-speech (TTS) using an installed macOS Vietnamese voice initially.
-5. Send generated TTS audio to a **selected physical output device** (wired headphones, speakers, or supported Bluetooth device) without sending it back into the virtual capture device.
-6. Replacement-style listening: source English audio routed to BlackHole, and only translated speech sent to physical headphones. A visible emergency stop and clear restoration instructions are mandatory.
-7. CLI-first implementation with start/stop, device diagnostics, translation logs, configurable segmentation, and graceful recovery.
-8. Work without network access for inference **after** required models, packages, and Vietnamese voice assets have been downloaded; local Ollama calls stay on loopback.
-9. Google Meet with 5 people: recognize the **mixed remote audio**. Speaker identification is not required.
+1. Capture system output audio routed to BlackHole 2ch without audio feedback.
+2. Local English ASR via MLX Whisper Small.en.
+3. Local English → Vietnamese translation via Ollama TranslateGemma 4B with prioritized scheduling.
+4. Meeting Follow UI in PySide6 with Live Meeting Focus and dual transcript history.
+5. In-memory `MeetingContextStore` (up to 1500 segments in bounded RAM).
+6. Local `KnowledgeStore` indexing user-selected Markdown and TXT files using SQLite FTS5.
+7. On-demand `ClaudeClient` (Claude Haiku 5.5) streaming short, spoken English responses and Vietnamese meaning.
+8. Citations validated against actual retrieved segment and document IDs.
+9. Strict privacy opt-in: transcripts are never saved to disk; Claude is contacted only on explicit user click.
+10. Offline resilience: live translation functions 100% locally without internet or API keys.
 
-### Explicitly out of scope for MVP
-
-- Meeting transcripts or context/memory persistence, RAG, answering the user, diarization/speaker identity, microphone recording, bilingual side-by-side overlay, bot joining meetings, browser extension, upload/cloud ASR, automatic subtitle files, systemwide speech dubbing perfectly synchronized to lip movement.
+### Historical MVP Scope (Archive Reference)
+*(Early specification restricted meeting memory and cloud APIs during initial PortAudio loop validation; see sections below for initial audio routing specifications).*
 - Native menu bar app, Core Audio Process Tap, automatic audio-device switching (later phase).
 - Seamless translation of **all** sounds: music, notification sounds, sound effects, encrypted/protected playback, and unsupported audio routes are not semantically translatable. Initial replacement mode intentionally silences non-speech source audio.
 - Zero-delay full-duplex simultaneous interpretation. There will be unavoidable capture, sentence-boundary, model and speech-generation latency.

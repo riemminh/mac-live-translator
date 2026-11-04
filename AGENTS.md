@@ -1,8 +1,21 @@
-# Instructions for Codex
+# Instructions for Codex & Copilot Development
 
-Start by reading `SPEC.md` fully and inspecting `main.py`, `requirements.txt`, and `README_LEGACY_MVP.md`.
+## Current Phase: Hybrid Translation & Claude Meeting Copilot
 
-Your current task is **P0 then P1 only**. Do **not** implement meeting memory, answer suggestions, speaker ID, context databases, a general agent, a web API, or a native SwiftUI app in this first increment. A CLI prototype that works reliably on the owner's **M1 Pro / 16GB** is the deliverable.
+The project scope has been expanded by the owner to include an on-demand, privacy-preserving **Meeting Copilot** alongside the local live translation pipeline:
+
+1. **Local Live Translation Pipeline (Independent & Autonomous)**:
+   - Captures system audio via BlackHole 2ch.
+   - Whisper Small.en (local MLX) + TranslateGemma 4B (local Ollama).
+   - Low-latency Meeting Follow mode with prioritized streaming and selective reconciliation.
+   - 100% offline-capable; never requires cloud APIs or internet during translation.
+
+2. **Meeting Copilot (On-Demand Cloud Assistant)**:
+   - In-memory `MeetingContextStore` capturing finalized English segments.
+   - Local in-memory `KnowledgeStore` (SQLite FTS5) indexing user-selected Markdown and TXT documentation.
+   - Remote `ClaudeClient` (Claude Haiku 5.5 via Anthropic API) invoked **strictly on explicit user action**.
+   - Generates suggested English replies (1–3 short spoken sentences), Vietnamese translation, and citations.
+   - Strict privacy opt-in: no automatic cloud uploads, transcripts never persisted to disk.
 
 ## Coding principles
 
@@ -12,16 +25,10 @@ Your current task is **P0 then P1 only**. Do **not** implement meeting memory, a
 - No unit tests unless the user explicitly asks; include manual smoke-check instructions.
 - Write file-by-file concrete changes and explain why.
 - Never assert that a hardware run was tested unless it actually ran on macOS.
-- Offline inference after local setup. Do not upload audio, save transcripts or use cloud APIs.
+- Local inference remains operational without cloud credentials or internet connectivity.
 
-## Exact work sequence
-
-1. Audit starter files and identify actual bugs/risk areas.
-2. Fix CLI/device checks, implement `--monitor-input` and reliable `--test-voice` if needed.
-3. Confirm deterministic BlackHole input → physical-headphone output routing and no feedback.
-4. Make ASR → local translation → Vietnamese TTS work with bounded queues.
-5. Document M1 Pro installation/permissions, normal operation, failure/recovery, measurable latency, and manual QA.
-6. Stop and report results and blockers. Do not jump to P2/P3 without owner approval.
+## Historical Note (Legacy MVP Scope)
+*The initial MVP phase prohibited meeting memory and cloud APIs to focus on core audio routing and latency benchmarks. That milestone has been completed, and the current phase integrates the hybrid Meeting Copilot while preserving all previous audio safety and performance invariants.*
 
 ## Reporting format
 
