@@ -214,3 +214,4 @@ Provide a concise, spoken English answer (1 to 3 short sentences), Vietnamese tr
             if words and words[0] in question_words and len(words) >= 4:
                 return text
         return None
+

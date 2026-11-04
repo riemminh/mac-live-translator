@@ -245,3 +245,4 @@ class ClaudeClient:
         usage.total_duration = now - start_time
         usage.time_to_first_token = first_token_time or usage.total_duration
         return "".join(full_text), usage
+

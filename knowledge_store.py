@@ -234,3 +234,4 @@ class KnowledgeStore:
         for c in chunks:
             formatted.append(f"[{c.chunk_id} - {c.heading}]\n{c.text}\n")
         return "\n".join(formatted).strip()
+
