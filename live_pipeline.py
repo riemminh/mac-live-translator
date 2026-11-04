@@ -1,13 +1,13 @@
-"""Low-latency text session. Audio and models never run on the Qt thread."""
-
+"""Continuous local capture, overlapping ASR, and sequential streaming translation."""
 from __future__ import annotations
 
 import math
 import queue
+import re
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable
 
 import numpy as np
@@ -17,14 +17,52 @@ import sounddevice as sd
 import main as core
 
 
-@dataclass(frozen=True)
-class Utterance:
+def tokens(text: str) -> list[str]:
+    return text.split()
+
+
+def key(word: str) -> str:
+    return re.sub(r"(^[^\w]+|[^\w]+$)", "", word).casefold()
+
+
+def common(a: list[str], b: list[str]) -> int:
+    count = 0
+    for left, right in zip(a, b):
+        if key(left) != key(right):
+            break
+        count += 1
+    return count
+
+
+UNSAFE_ENDINGS = {"a", "an", "and", "at", "by", "for", "from", "in", "of",
+                  "on", "or", "roll", "the", "to", "with", "without", "not"}
+
+
+@dataclass(eq=False)
+class Fragment:
+    id: int
+    english: list[str]
+    context: str
+    queued_at: float
+    vietnamese: str = ""
+    status: str = "queued"
+
+
+@dataclass
+class Segment:
     id: int
     started: float
-    ended: float
-    text: str
-    final: bool
-    version: int
+    previous: str = ""
+    previous_at: float = 0.0
+    stable: str = ""
+    stable_since: float = 0.0
+    fragments: list[Fragment] = field(default_factory=list)
+    final_english: str | None = None
+    revision: int = 0
+    corrections: int = 0
+    first_en_at: float | None = None
+    first_vi_at: float | None = None
+    finished: bool = False
 
 
 def run(cfg: core.Config, emit: Callable[[str, dict], None], stop: threading.Event) -> None:
@@ -36,27 +74,23 @@ def run(cfg: core.Config, emit: Callable[[str, dict], None], stop: threading.Eve
     if stop.is_set():
         return
 
-    # 20 ms blocks, eight seconds maximum: a Whisper decode can take longer
-    # than the old 32-block buffer without losing the next utterance.
     blocks: queue.Queue[tuple[int, float, np.ndarray]] = queue.Queue(maxsize=400)
-    translations: queue.Queue[Utterance] = queue.Queue(maxsize=2)
+    jobs: queue.Queue[tuple[Segment, Fragment]] = queue.Queue(maxsize=12)
     errors: queue.Queue[Exception] = queue.Queue()
+    lock = threading.Lock()
     dropped = {"audio": 0, "translation": 0}
     seq = 0
-    latest_version = 0
-    latest_by_id: dict[int, int] = {}
-    final_text: dict[int, str] = {}
-    preview_result: dict[int, tuple[str, float | None]] = {}
-    early_available: set[int] = set()
+
+    def trace(seg: Segment, stage: str, **extra: object) -> None:
+        emit("trace", {"id": seg.id, "stage": stage, "at": time.monotonic(),
+                       "source_start": seg.started, **extra})
 
     def capture(indata: np.ndarray, frames: int, timing: object, status: sd.CallbackFlags) -> None:
         nonlocal seq
         seq += 1
-        # PortAudio times share a clock; translate the first sample's ADC time
-        # to the monotonic clock used for all UI and Ollama measurements.
-        callback_now = time.monotonic()
+        now = time.monotonic()
         age = min(1.0, max(0.0, timing.currentTime - timing.inputBufferAdcTime))
-        item = (seq, callback_now - age, indata.copy())
+        item = (seq, now - age, indata.copy())
         try:
             blocks.put_nowait(item)
         except queue.Full:
@@ -67,214 +101,269 @@ def run(cfg: core.Config, emit: Callable[[str, dict], None], stop: threading.Eve
             except queue.Empty:
                 pass
 
-    def queue_translation(number: int, started: float, text: str, final: bool) -> None:
-        nonlocal latest_version
-        latest_version += 1
-        item = Utterance(number, started, time.monotonic(), text, final, latest_version)
-        latest_by_id[number] = item.version
-        if not final:
-            early_available.add(number)
-        emit("trace", {"id": number, "stage": "eligible" if not final else "final_eligible",
-                       "at": item.ended, "source_start": started})
+    def committed(seg: Segment) -> list[str]:
+        return [word for frag in seg.fragments for word in frag.english]
+
+    def enqueue(seg: Segment, english: list[str], context: str) -> None:
+        if not english:
+            return
+        with lock:
+            frag = Fragment(seg.revision + 1, english, context, time.monotonic())
+            seg.fragments.append(frag)
+            seg.revision += 1
+            revision = seg.revision
         try:
-            translations.put_nowait(item)
-        except queue.Full:
-            try:
-                removed = translations.get_nowait()
-                if not removed.final:
-                    early_available.discard(removed.id)
-                emit("translation_skipped", {"id": removed.id, "reason": "queue full"})
-                dropped["translation"] += 1
-            except queue.Empty:
-                pass
-            translations.put_nowait(item)
-        emit("trace", {"id": number, "stage": "queued", "at": time.monotonic(),
-                       "source_start": started})
+            jobs.put((seg, frag), timeout=0.1)
+        except queue.Full as exc:
+            dropped["translation"] += 1
+            emit("translation_skipped", {"id": seg.id, "reason": "queue full; stopping to avoid lost words"})
+            raise RuntimeError("Translation queue full; session stopped to avoid losing words") from exc
+        trace(seg, "queued", fragment_id=frag.id, revision=revision, queue_size=jobs.qsize())
+        emit("coverage", {"id": seg.id, "fragment_id": frag.id, "words": len(english),
+                          "queue_size": jobs.qsize()})
+
+    def invalidate_from(seg: Segment, hypothesis: list[str]) -> None:
+        with lock:
+            matched = common(committed(seg), hypothesis)
+            if matched == len(committed(seg)):
+                return
+            keep = 0
+            covered = 0
+            for frag in seg.fragments:
+                covered += len(frag.english)
+                if covered > matched:
+                    break
+                keep += 1
+            seg.fragments = seg.fragments[:keep]
+            seg.revision += 1
+            seg.corrections += 1
+            revision = seg.revision
+        emit("translation_revision", {"id": seg.id, "revision": revision})
+
+    def maybe_finalize(seg: Segment) -> None:
+        with lock:
+            if (seg.finished or seg.final_english is None or not seg.fragments
+                    or any(frag.status != "done" for frag in seg.fragments)):
+                return
+            seg.finished = True
+            result = " ".join(frag.vietnamese for frag in seg.fragments).strip()
+            revision = seg.revision
+            first = seg.first_vi_at
+            covered = len(committed(seg))
+            total = len(tokens(seg.final_english))
+            fragments = len(seg.fragments)
+            corrections = seg.corrections
+        if result:
+            trace(seg, "final_vi")
+            emit("coverage_final", {"id": seg.id, "english_words": total,
+                                    "covered_words": covered, "fragments": fragments,
+                                    "revisions": corrections})
+            emit("vietnamese_final", {"id": seg.id, "text": result, "revision": revision,
+                                       "first_token_latency": first - seg.started if first else None,
+                                       "latency": time.monotonic() - seg.started})
 
     def asr_worker() -> None:
-        # Overlapping windows update one current subtitle. Only a silence or
-        # duration boundary commits text and submits it for translation.
         audio: deque[np.ndarray] = deque()
         samples = 0
         active = False
-        start = 0.0
+        seg: Segment | None = None
         last_voice = 0.0
         last_decode = 0.0
         decoded_samples = 0
         last_voiced_sample = 0
         decoded_voiced_sample = 0
-        previous = ""
-        stable = ""
-        early_sent = ""
-        first_en_emitted = False
         number = 0
         last_seq = 0
         rate = cfg.input_rate
 
         def decode(final: bool) -> None:
-            nonlocal last_decode, previous, stable, number, early_sent, first_en_emitted
-            nonlocal decoded_samples, decoded_voiced_sample
+            nonlocal last_decode, decoded_samples, decoded_voiced_sample
+            assert seg is not None
             if samples < int(0.45 * rate):
                 return
-            # Limit inference memory to the most recent 7 seconds. The overlap
-            # between successive decodes is intentional.
-            if final and previous and last_voiced_sample <= decoded_voiced_sample:
-                text = previous
+            if final and seg.previous and last_voiced_sample <= decoded_voiced_sample:
+                text = seg.previous
             else:
                 signal = np.concatenate(tuple(audio))[-int(7 * rate):]
-                reduced = scipy.signal.resample_poly(signal, core.ASR_RATE, rate).astype(np.float32)
-                text = core.transcribe(reduced, cfg.whisper_path).strip()
-            last_decode = time.monotonic()
+                pcm = scipy.signal.resample_poly(signal, core.ASR_RATE, rate).astype(np.float32)
+                text = core.transcribe(pcm, cfg.whisper_path).strip()
+            now = time.monotonic()
+            last_decode = now
             decoded_samples = samples
             decoded_voiced_sample = last_voiced_sample
             if not text or text.casefold() in {"[music]", "(music)"}:
                 return
-            if not first_en_emitted:
-                emit("trace", {"id": number + 1, "stage": "first_en_ready",
-                               "at": time.monotonic(), "source_start": start})
-                first_en_emitted = True
-            if not final:
-                old_words, new_words = previous.split(), text.split()
-                common = []
-                for old, new in zip(old_words, new_words):
-                    if old.casefold() != new.casefold():
-                        break
-                    common.append(new)
-                stable = " ".join(common)
-                previous = text
-                if stable:
-                    emit("trace", {"id": number + 1, "stage": "stable",
-                                   "at": time.monotonic(), "source_start": start})
-                emit("english_partial", {"id": number + 1, "text": text,
-                                         "stable": stable, "latency": time.monotonic() - start})
-                words = stable.split()
-                if not early_sent and (len(words) >= 5 or
-                                       (len(words) >= 4 and stable.endswith((".", "?", "!", ",", ";", ":")))):
-                    early_sent = stable
-                    queue_translation(number + 1, start, stable, False)
-            else:
-                number += 1
-                final_text[number] = text
-                emit("english_final", {"id": number, "text": text,
-                                       "latency": time.monotonic() - start})
-                emit("trace", {"id": number, "stage": "final_en",
-                               "at": time.monotonic(), "source_start": start})
-                if early_sent == text and (number in early_available or number in preview_result):
-                    preview = preview_result.get(number)
-                    if preview:
-                        result, first = preview
-                        emit("vietnamese_final", {"id": number, "text": result,
-                                                  "first_token_latency": first,
-                                                  "latency": time.monotonic() - start})
+            if seg.first_en_at is None:
+                seg.first_en_at = now
+                trace(seg, "first_en_ready")
+            current = tokens(text)
+            if final:
+                trace(seg, "final_en")
+                emit("english_final", {"id": seg.id, "text": text,
+                                       "latency": now - seg.started})
+                invalidate_from(seg, current)
+                with lock:
+                    remainder = current[len(committed(seg)):]
+                    context = " ".join(committed(seg)[-12:])
+                    seg.final_english = text
+                if remainder:
+                    enqueue(seg, remainder, context)
                 else:
-                    queue_translation(number, start, text, True)
+                    maybe_finalize(seg)
+                return
+
+            previous = tokens(seg.previous)
+            stable_count = common(previous, current)
+            stable_words = current[:stable_count]
+            stable_text = " ".join(stable_words)
+            if stable_text and stable_text != seg.stable:
+                seg.stable_since = seg.previous_at
+                trace(seg, "stable")
+            seg.stable = stable_text
+            seg.previous = text
+            seg.previous_at = now
+            emit("english_partial", {"id": seg.id, "text": text, "stable": stable_text,
+                                     "latency": now - seg.started})
+            invalidate_from(seg, current)
+            with lock:
+                prefix = committed(seg)
+            pending = stable_words[len(prefix):]
+            if len(pending) < 4:
+                return
+            cut = min(len(pending), 8)
+            boundaries = [i + 1 for i, word in enumerate(pending[:cut])
+                          if i >= 3 and word.endswith((",", ";", ":", ".", "?", "!"))]
+            if boundaries:
+                cut = boundaries[-1]
+            elif cut == len(pending) and not pending[-1].endswith((".", "?", "!")):
+                cut -= 1
+            while cut > 0 and key(pending[cut - 1]) in UNSAFE_ENDINGS:
+                cut -= 1
+            candidate = pending[:cut]
+            if len(candidate) >= 4 and len({key(word) for word in candidate}) >= 3:
+                trace(seg, "eligible", stable_wait=now - seg.stable_since)
+                enqueue(seg, candidate, " ".join(prefix[-12:]))
 
         while not stop.is_set():
             try:
-                current, stamp, block = blocks.get(timeout=0.2)
+                current_seq, stamp, block = blocks.get(timeout=0.2)
             except queue.Empty:
                 continue
-            if last_seq and current != last_seq + 1:
+            if last_seq and current_seq != last_seq + 1:
+                if seg and seg.previous:
+                    emit("translation_skipped", {"id": seg.id, "reason": "audio overflow"})
+                    with lock:
+                        seg.fragments.clear()
+                        seg.revision += 1
+                    emit("vietnamese_cancelled", {"id": seg.id})
                 audio.clear()
                 samples = 0
                 active = False
-                previous = stable = ""
-                early_sent = ""
-                first_en_emitted = False
+                seg = None
                 decoded_samples = last_voiced_sample = decoded_voiced_sample = 0
-            last_seq = current
+            last_seq = current_seq
             mono = block.mean(axis=1).astype(np.float32)
             rms = float(np.sqrt(np.mean(np.square(mono, dtype=np.float64))))
             voiced = math.isfinite(rms) and rms >= cfg.min_rms
             if voiced and not active:
                 active = True
-                start = stamp
+                number += 1
+                seg = Segment(number, stamp)
                 last_decode = stamp
             if not active:
                 continue
+            assert seg is not None
             audio.append(mono)
             samples += len(mono)
             if voiced:
                 last_voice = stamp + len(mono) / rate
                 last_voiced_sample = samples
             now = time.monotonic()
-            new_samples = samples - decoded_samples
-            if (now - last_decode >= 0.75 and new_samples >= int(0.45 * rate)
+            if (now - last_decode >= 0.75 and samples - decoded_samples >= int(0.45 * rate)
                     and samples >= int(0.7 * rate) and voiced):
                 decode(False)
             pause = stamp + len(mono) / rate - last_voice
-            boundary = 0.55 if previous.rstrip().endswith((".", "?", "!")) else 0.85
+            boundary = 0.55 if seg.previous.rstrip().endswith((".", "?", "!")) else 0.85
             if (samples >= int(1.2 * rate) and pause >= boundary) or samples >= int(7 * rate):
                 decode(True)
                 audio.clear()
                 samples = 0
                 active = False
-                previous = stable = ""
-                early_sent = ""
-                first_en_emitted = False
+                seg = None
                 decoded_samples = last_voiced_sample = decoded_voiced_sample = 0
 
     def translation_worker() -> None:
         while not stop.is_set():
             try:
-                item = translations.get(timeout=0.2)
+                seg, frag = jobs.get(timeout=0.2)
             except queue.Empty:
                 continue
-            emit("trace", {"id": item.id, "stage": "dequeued", "at": time.monotonic(),
-                           "source_start": item.started})
-            if time.monotonic() - item.ended > cfg.max_lag:
+            with lock:
+                valid = frag in seg.fragments and not seg.finished
+            if not valid:
                 dropped["translation"] += 1
-                early_available.discard(item.id)
-                emit("translation_skipped", {"id": item.id, "reason": "stale queue item"})
+                emit("translation_skipped", {"id": seg.id, "reason": "obsolete fragment"})
                 continue
-            if item.version != latest_by_id.get(item.id):
-                dropped["translation"] += 1
-                early_available.discard(item.id)
-                emit("translation_skipped", {"id": item.id, "reason": "newer revision"})
-                continue
+            wait = time.monotonic() - frag.queued_at
+            trace(seg, "dequeued", fragment_id=frag.id, queue_wait=wait)
+            if wait > cfg.max_lag:
+                emit("translation_delayed", {"id": seg.id, "wait": wait})
+            with lock:
+                frag.status = "translating"
+
             class Cancelled:
                 def is_set(self) -> bool:
-                    return stop.is_set() or item.version != latest_by_id.get(item.id)
+                    with lock:
+                        return stop.is_set() or frag not in seg.fragments
 
             cancel = Cancelled()
-            first = None
             last_update = 0.0
+
             def request_start() -> None:
-                emit("trace", {"id": item.id, "stage": "request_start",
-                               "at": time.monotonic(), "source_start": item.started})
+                trace(seg, "request_start", fragment_id=frag.id)
 
             def token(text: str) -> None:
-                nonlocal first, last_update
-                if first is None:
-                    received_at = time.monotonic()
-                    first = received_at - item.started
-                    emit("trace", {"id": item.id, "stage": "first_token_received",
-                                   "at": received_at, "source_start": item.started})
-                if time.monotonic() - last_update >= 0.05:
-                    emit("vietnamese_partial", {"id": item.id, "text": text,
-                                                 "latency": first,
-                                                 "received_at": time.monotonic()})
-                    last_update = time.monotonic()
+                nonlocal last_update
+                now = time.monotonic()
+                with lock:
+                    if frag not in seg.fragments:
+                        return
+                    first = seg.first_vi_at is None
+                    if first:
+                        seg.first_vi_at = now
+                    previous_vi = " ".join(item.vietnamese for item in seg.fragments
+                                           if item is not frag and item.status == "done")
+                    revision = seg.revision
+                if first:
+                    trace(seg, "first_token_received", fragment_id=frag.id)
+                if first or now - last_update >= 0.05:
+                    preview = " ".join(part for part in (previous_vi, text) if part).strip()
+                    emit("vietnamese_partial", {"id": seg.id, "text": preview,
+                         "revision": revision, "latency": now - seg.started, "received_at": now})
+                    last_update = now
+
             result = core.translate_stream(
-                item.text, cfg.translation_model, token, cancel,
+                " ".join(frag.english), cfg.translation_model, token, cancel,
                 on_request_start=request_start,
-                on_stats=lambda stats: emit("ollama_stats", {"id": item.id,
+                on_stats=lambda stats: emit("ollama_stats", {"id": seg.id,
                     "load_ms": stats.get("load_duration", 0) / 1_000_000,
                     "prompt_ms": stats.get("prompt_eval_duration", 0) / 1_000_000,
                     "eval_ms": stats.get("eval_duration", 0) / 1_000_000}),
-            )
-            if cancel.is_set():
-                early_available.discard(item.id)
-                emit("vietnamese_cancelled", {"id": item.id})
-                dropped["translation"] += 1
-            elif result:
-                if not item.final:
-                    preview_result[item.id] = (result, first)
-                    early_available.discard(item.id)
-                if item.final or final_text.get(item.id) == item.text:
-                    emit("vietnamese_final", {"id": item.id, "text": result,
-                                              "first_token_latency": first,
-                                              "latency": time.monotonic() - item.started})
+                context=frag.context)
+            with lock:
+                if frag not in seg.fragments or stop.is_set():
+                    dropped["translation"] += 1
+                    continue
+                frag.vietnamese = result
+                frag.status = "done"
+                preview = " ".join(item.vietnamese for item in seg.fragments if item.vietnamese)
+                revision = seg.revision
+            trace(seg, "translation_done", fragment_id=frag.id)
+            emit("vietnamese_partial", {"id": seg.id, "text": preview.strip(),
+                 "revision": revision,
+                 "latency": (seg.first_vi_at or time.monotonic()) - seg.started,
+                 "received_at": time.monotonic()})
+            maybe_finalize(seg)
 
     def guarded(name: str, work: Callable[[], None]) -> None:
         try:
@@ -299,7 +388,7 @@ def run(cfg: core.Config, emit: Callable[[str, dict], None], stop: threading.Eve
                 if core.device_identity(cfg.output_device) != cfg.output_identity:
                     raise RuntimeError("Headphone output changed; restart")
                 if time.monotonic() >= next_health:
-                    emit("health", {"dropped": dropped.copy()})
+                    emit("health", {"dropped": dropped.copy(), "translation_backlog": jobs.qsize()})
                     next_health = time.monotonic() + 5
         if not errors.empty():
             raise errors.get_nowait()

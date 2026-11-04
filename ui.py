@@ -22,7 +22,8 @@ class Window(QMainWindow):
         super().__init__()
         self.setWindowTitle("Mac Live Translator")
         self.resize(760, 540)
-        self.events: queue.Queue[tuple[str, dict]] = queue.Queue(maxsize=128)
+        self.events: queue.Queue[tuple[str, dict]] = queue.Queue(maxsize=512)
+        self.event_overflow = threading.Event()
         self.stop_event = threading.Event()
         self.worker: threading.Thread | None = None
         self.final_en: list[str] = []
@@ -30,10 +31,14 @@ class Window(QMainWindow):
         self.current_id = None
         self.final_en_ids: set[int] = set()
         self.final_vi_ids: set[int] = set()
+        self.vi_revisions: dict[int, int] = {}
+        self.preview_id: int | None = None
         self.first_english: dict[int, float] = {}
         self.first_vietnamese: dict[int, float] = {}
         self.traces: dict[int, dict[str, float]] = {}
         self.results: list[tuple[float, float, float]] = []
+        self.coverage = {"english_words": 0, "covered_words": 0,
+                         "fragments": 0, "revisions": 0, "skipped": 0}
 
         root = QWidget()
         layout = QVBoxLayout(root)
@@ -60,16 +65,16 @@ class Window(QMainWindow):
         self.english.setReadOnly(True)
         self.vietnamese = QTextEdit()
         self.vietnamese.setReadOnly(True)
-        layout.addWidget(QLabel("English transcript"))
-        self.english_live = QLabel("")
-        self.english_live.setWordWrap(True)
-        layout.addWidget(self.english_live)
-        layout.addWidget(self.english)
         layout.addWidget(QLabel("Vietnamese translation"))
         self.vietnamese_live = QLabel("")
         self.vietnamese_live.setWordWrap(True)
         layout.addWidget(self.vietnamese_live)
         layout.addWidget(self.vietnamese)
+        layout.addWidget(QLabel("English transcript"))
+        self.english_live = QLabel("")
+        self.english_live.setWordWrap(True)
+        layout.addWidget(self.english_live)
+        layout.addWidget(self.english)
         controls = QHBoxLayout()
         self.start_button = QPushButton("Start")
         self.stop_button = QPushButton("Stop")
@@ -95,11 +100,11 @@ class Window(QMainWindow):
         try:
             self.events.put_nowait((kind, data))
         except queue.Full:
-            try:
-                self.events.get_nowait()
-                self.events.put_nowait((kind, data))
-            except queue.Empty:
-                pass
+            if kind in {"english_partial", "vietnamese_partial", "trace"}:
+                return  # A newer partial will replace this one.
+            print(f"UI_QUEUE_FULL kind={kind}; stopping to avoid losing a final subtitle", flush=True)
+            self.event_overflow.set()
+            self.stop_event.set()
 
     def start(self) -> None:
         if self.worker and self.worker.is_alive():
@@ -108,15 +113,19 @@ class Window(QMainWindow):
             self.status.setText("BlackHole input or headphone output is missing")
             return
         self.stop_event = threading.Event()
+        self.event_overflow.clear()
         self.final_en.clear()
         self.final_vi.clear()
         self.current_id = None
         self.final_en_ids.clear()
         self.final_vi_ids.clear()
+        self.vi_revisions.clear()
+        self.preview_id = None
         self.first_english.clear()
         self.first_vietnamese.clear()
         self.traces.clear()
         self.results.clear()
+        self.coverage = dict.fromkeys(self.coverage, 0)
         self.english.clear()
         self.vietnamese.clear()
         self.english_live.clear()
@@ -149,7 +158,22 @@ class Window(QMainWindow):
         self.stop_event.set()
         self.status.setText("Stopping…")
 
+    @staticmethod
+    def show_history(view: QTextEdit, lines: list[str]) -> None:
+        scrollbar = view.verticalScrollBar()
+        old_position = scrollbar.value()
+        old_maximum = scrollbar.maximum()
+        view.setPlainText("\n".join(lines))
+        # Follow the newest entry at the top; retain the reader's place when
+        # they have scrolled down into older entries.
+        if old_position:
+            scrollbar.setValue(old_position + scrollbar.maximum() - old_maximum)
+        else:
+            scrollbar.setValue(0)
+
     def drain(self) -> None:
+        if self.event_overflow.is_set():
+            self.status.setText("Error: UI event queue full; session stopped")
         while True:
             try:
                 kind, data = self.events.get_nowait()
@@ -165,26 +189,46 @@ class Window(QMainWindow):
                 self.first_english.setdefault(data["id"], data["latency"])
                 self.final_en_ids.add(data["id"])
                 self.current_id = data["id"]
-                self.final_en.append(f"[{data['id']}] {data['text']}")
-                self.english.setPlainText("\n".join(self.final_en[-100:]))
+                self.final_en.insert(0, f"[{data['id']}] {data['text']}")
+                del self.final_en[100:]
+                self.show_history(self.english, self.final_en)
                 self.english_live.clear()
                 self.metrics.setText(f"Audio → first EN: {self.first_english[data['id']]:.2f}s  ·  first VI: —  ·  final VI: —")
                 self.status.setText(f"Listening · final English {data['latency']:.1f}s")
+            elif kind == "translation_revision":
+                print(f"REVISION id={data['id']} version={data['revision']}", flush=True)
+                if data["revision"] > self.vi_revisions.get(data["id"], -1):
+                    self.vi_revisions[data["id"]] = data["revision"]
+                    if self.preview_id == data["id"]:
+                        self.vietnamese_live.clear()
             elif kind == "vietnamese_partial" and data["id"] not in self.final_vi_ids:
-                self.vietnamese_live.setText(f"[{data['id']}] … {data['text']}")
+                if data.get("revision", 0) < self.vi_revisions.get(data["id"], -1):
+                    continue
+                self.vi_revisions[data["id"]] = data.get("revision", 0)
+                if self.preview_id is not None and data["id"] < self.preview_id:
+                    continue
+                self.preview_id = data["id"]
+                self.vietnamese_live.setText(f"[{data['id']}] Bản nháp · {data['text']}")
                 self.first_vietnamese.setdefault(data["id"], data["latency"])
                 self.traces.setdefault(data["id"], {}).setdefault("first_token_rendered", time.monotonic())
                 first_en = self.first_english.get(data["id"])
                 self.metrics.setText(f"Audio → first EN: {first_en:.2f}s  ·  first VI: {self.first_vietnamese[data['id']]:.2f}s  ·  final VI: —" if first_en is not None else "Audio → first EN: —  ·  first VI: —  ·  final VI: —")
             elif kind == "vietnamese_cancelled":
-                if self.vietnamese_live.text().startswith(f"[{data['id']}]"):
+                if self.preview_id == data["id"]:
                     self.vietnamese_live.clear()
+                    self.preview_id = None
             elif kind == "vietnamese_final" and data["id"] not in self.final_vi_ids:
                 self.final_vi_ids.add(data["id"])
-                self.final_vi.append(f"[{data['id']}] {data['text']}")
-                self.vietnamese.setPlainText("\n".join(self.final_vi[-100:]))
-                self.vietnamese_live.clear()
-                first = self.first_vietnamese.get(data["id"], data["first_token_latency"])
+                self.final_vi.insert(0, f"[{data['id']}] {data['text']}")
+                del self.final_vi[100:]
+                self.show_history(self.vietnamese, self.final_vi)
+                if self.preview_id == data["id"]:
+                    self.vietnamese_live.clear()
+                    self.preview_id = None
+                # A token can arrive for an older segment while a newer draft
+                # owns the live label. In that case the final line is its first
+                # visible Vietnamese text.
+                first = self.first_vietnamese.get(data["id"], data["latency"])
                 first_en = self.first_english.get(data["id"])
                 if first is not None and first_en is not None:
                     self.metrics.setText(f"Audio → first EN: {first_en:.2f}s  ·  first VI: {first:.2f}s  ·  final VI: {data['latency']:.2f}s")
@@ -209,15 +253,38 @@ class Window(QMainWindow):
                 trace = self.traces.setdefault(data["id"], {})
                 trace.setdefault("source_start", data["source_start"])
                 trace.setdefault(data["stage"], data["at"])
+                if "fragment_id" in data or "stable_wait" in data:
+                    extra = " ".join(f"{name}={value:.3f}s" if name in {"stable_wait", "queue_wait"}
+                                     else f"{name}={value}" for name, value in data.items()
+                                     if name in {"fragment_id", "revision", "stable_wait", "queue_wait", "queue_size"})
+                    print(f"TRACE id={data['id']} stage={data['stage']} "
+                          f"audio_elapsed={data['at'] - data['source_start']:.3f}s {extra}", flush=True)
+            elif kind == "coverage":
+                print(f"COVERAGE id={data['id']} fragment={data['fragment_id']} "
+                      f"english_words={data['words']} backlog={data['queue_size']}", flush=True)
+            elif kind == "coverage_final":
+                for name in ("english_words", "covered_words", "fragments", "revisions"):
+                    self.coverage[name] += data[name]
+                print(f"COVERAGE_FINAL id={data['id']} english_words={data['english_words']} "
+                      f"covered_words={data['covered_words']} fragments={data['fragments']} "
+                      f"revisions={data['revisions']}", flush=True)
+            elif kind == "translation_delayed":
+                self.status.setText(f"Listening · translation queue wait {data['wait']:.1f}s")
             elif kind == "ollama_stats":
                 print(f"OLLAMA id={data['id']} load={data['load_ms']:.1f}ms prompt={data['prompt_ms']:.1f}ms eval={data['eval_ms']:.1f}ms", flush=True)
             elif kind == "translation_skipped":
+                self.coverage["skipped"] += 1
                 print(f"SKIPPED id={data['id']} reason={data['reason']}", flush=True)
+                if data["reason"] in {"audio overflow", "queue full; stopping to avoid lost words"}:
+                    self.status.setText(f"Listening · skipped speech: {data['reason']}")
             elif kind == "health" and any(data["dropped"].values()):
-                self.status.setText(f"Listening · dropped {data['dropped']}")
+                self.status.setText(f"Listening · dropped {data['dropped']} · translation backlog {data['translation_backlog']}")
             elif kind == "status":
                 self.status.setText(data["text"])
             elif kind == "stopped":
+                self.vietnamese_live.clear()
+                self.english_live.clear()
+                self.preview_id = None
                 if self.results:
                     columns = list(zip(*self.results))
                     def p95(values: tuple[float, ...]) -> float:
@@ -226,6 +293,8 @@ class Window(QMainWindow):
                     print(f"BENCHMARK n={len(self.results)} " + " ".join(
                         f"{name}_p50={statistics.median(values):.3f}s {name}_p95={p95(values):.3f}s"
                         for name, values in zip(("first_en", "first_vi", "final_vi"), columns)), flush=True)
+                print("COVERAGE_SUMMARY " + " ".join(f"{key}={value}"
+                      for key, value in self.coverage.items()), flush=True)
                 self.start_button.setEnabled(True)
                 self.stop_button.setEnabled(False)
                 if not self.status.text().startswith("Error:"):
