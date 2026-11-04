@@ -1,4 +1,4 @@
-"""Continuous local capture, overlapping ASR, and sequential streaming translation."""
+"""Continuous local capture, overlapping ASR, and prioritized streaming translation."""
 from __future__ import annotations
 
 import math
@@ -47,6 +47,11 @@ UNSAFE_ENDINGS = {
     "carry", "bring", "point", "pick", "check", "break", "turn", "give", "take",
 }
 
+PHRASAL_HEADS = {
+    "roll", "cut", "sign", "shut", "scale", "spin", "set", "log", "fall",
+    "carry", "bring", "point", "pick", "check", "break", "turn", "give", "take",
+}
+
 PHRASAL_PARTICLES = {
     "back", "over", "off", "down", "up", "in", "out", "on", "away", "through", "about"
 }
@@ -59,17 +64,29 @@ NEGATIONS = {
 
 SUBORDINATING = {
     "because", "although", "since", "unless", "if", "whether", "while",
-    "whereas", "as", "so", "until", "before", "after"
+    "whereas", "until", "before", "after", "as"
+}
+
+FILLER_WORDS = {
+    "um", "uh", "uh-huh", "mhm", "ah", "er", "like", "you know",
+    "yeah", "yep", "yes", "okay", "right", "so", "well",
 }
 
 
+def is_filler(words: list[str]) -> bool:
+    """Identify short conversational speech consisting only of fillers."""
+    if not words or len(words) > 3:
+        return False
+    return all(key(w) in FILLER_WORDS for w in words)
+
+
 def is_risky_boundary(left_words: list[str], right_words: list[str]) -> bool:
-    """Detect syntactic boundaries prone to awkward or distorted Vietnamese translations."""
+    """Detect genuine syntactic boundaries prone to distorted Vietnamese translations."""
     if not left_words or not right_words:
         return False
     left_last = left_words[-1]
     right_first = right_words[0]
-    # Sentence-ending punctuation marks an independent boundary
+    # Sentence-ending or clause-ending punctuation marks an independent boundary
     if left_last.endswith((".", "?", "!")):
         return False
     if left_last.endswith((";", ":")):
@@ -78,16 +95,13 @@ def is_risky_boundary(left_words: list[str], right_words: list[str]) -> bool:
     right_k = key(right_first)
     if left_k in UNSAFE_ENDINGS:
         return True
-    if right_k in PHRASAL_PARTICLES:
+    if left_k in PHRASAL_HEADS and right_k in PHRASAL_PARTICLES:
         return True
     if left_k in NEGATIONS or right_k in NEGATIONS:
         return True
     if right_k in SUBORDINATING:
         return True
     if left_k.isdigit() or right_k.isdigit() or left_last.endswith("%") or right_first.startswith("$"):
-        return True
-    # If the left fragment didn't end with a comma, it was sliced mid-clause
-    if not left_last.endswith(","):
         return True
     return False
 
@@ -125,6 +139,7 @@ class Segment:
     final_vi_rendered_at: float | None = None
     finished: bool = False
     reconciled: bool = False
+    is_filler: bool = False
 
 
 def run(cfg: core.Config, emit: Callable[[str, dict], None], stop: threading.Event) -> None:
@@ -139,14 +154,25 @@ def run(cfg: core.Config, emit: Callable[[str, dict], None], stop: threading.Eve
     blocks: queue.Queue[tuple[int, float, np.ndarray]] = queue.Queue(maxsize=400)
     lock = threading.Lock()
     cv = threading.Condition(lock)
-    jobs: list[tuple[Segment, Fragment]] = []
+    # Two-priority scheduling: high_jobs for live fragments, low_jobs for reconciliation
+    high_jobs: list[tuple[Segment, Fragment]] = []
+    low_jobs: list[tuple[Segment, str, float]] = []  # (seg, text, queued_at)
     errors: queue.Queue[Exception] = queue.Queue()
     dropped = {"audio": 0, "translation": 0}
+    recent_final_en: deque[str] = deque(maxlen=2)
     seq = 0
 
     def purge_obsolete_jobs() -> None:
-        nonlocal jobs
-        jobs = [(s, f) for s, f in jobs if f in s.fragments and not s.finished]
+        nonlocal high_jobs, low_jobs
+        high_jobs = [(s, f) for s, f in high_jobs if f in s.fragments and not s.finished]
+        low_jobs = [(s, t, q) for s, t, q in low_jobs if not s.finished]
+
+    def build_context(prefix_words: list[str]) -> str:
+        parts: list[str] = []
+        for past_sent in recent_final_en:
+            parts.extend(tokens(past_sent))
+        parts.extend(prefix_words)
+        return " ".join(parts[-28:])
 
     def trace(seg: Segment, stage: str, **extra: object) -> None:
         emit("trace", {"id": seg.id, "stage": stage, "at": time.monotonic(),
@@ -176,7 +202,7 @@ def run(cfg: core.Config, emit: Callable[[str, dict], None], stop: threading.Eve
             return
         with cv:
             purge_obsolete_jobs()
-            if len(jobs) >= 12:
+            if len(high_jobs) + len(low_jobs) >= 16:
                 dropped["translation"] += 1
                 emit("translation_skipped", {"id": seg.id, "reason": "queue full; stopping to avoid lost words"})
                 raise RuntimeError("Translation queue full; session stopped to avoid losing words")
@@ -184,9 +210,9 @@ def run(cfg: core.Config, emit: Callable[[str, dict], None], stop: threading.Eve
             seg.fragments.append(frag)
             seg.revision += 1
             revision = seg.revision
-            jobs.append((seg, frag))
+            high_jobs.append((seg, frag))
             cv.notify()
-            queue_len = len(jobs)
+            queue_len = len(high_jobs)
         trace(seg, "queued", fragment_id=frag.id, revision=revision, queue_size=queue_len)
         emit("coverage", {"id": seg.id, "fragment_id": frag.id, "words": len(english),
                           "queue_size": queue_len})
@@ -226,6 +252,9 @@ def run(cfg: core.Config, emit: Callable[[str, dict], None], stop: threading.Eve
             total = len(tokens(seg.final_english))
             fragments_count = len(seg.fragments)
             corrections = seg.corrections
+            is_fill = seg.is_filler
+            if seg.final_english and not is_fill:
+                recent_final_en.append(seg.final_english)
         if result:
             trace(seg, "final_vi")
             emit("coverage_final", {"id": seg.id, "english_words": total,
@@ -234,7 +263,8 @@ def run(cfg: core.Config, emit: Callable[[str, dict], None], stop: threading.Eve
             emit("vietnamese_final", {"id": seg.id, "text": result, "revision": revision,
                                        "first_token_received_latency": (first_received - seg.started) if first_received else None,
                                        "first_token_latency": (first_received - seg.started) if first_received else None,
-                                       "latency": time.monotonic() - seg.started})
+                                       "latency": time.monotonic() - seg.started,
+                                       "is_filler": is_fill})
 
     def asr_worker() -> None:
         audio: deque[np.ndarray] = deque()
@@ -271,15 +301,18 @@ def run(cfg: core.Config, emit: Callable[[str, dict], None], stop: threading.Eve
                 seg.first_en_at = now
                 trace(seg, "first_en_ready")
             current = tokens(text)
+            seg.is_filler = is_filler(current)
+
             if final:
                 trace(seg, "final_en")
                 emit("english_final", {"id": seg.id, "text": text,
-                                       "latency": now - seg.started})
+                                       "latency": now - seg.started,
+                                       "is_filler": seg.is_filler})
                 invalidate_from(seg, current)
                 with cv:
                     committed_words = committed(seg)
                     remainder = current[len(committed_words):]
-                    context = " ".join(committed_words[-12:])
+                    context = build_context(committed_words)
                     seg.final_english = text
                     frag = None
                     # Latency/throughput optimization: coalesce into single queued fragment if awaiting start
@@ -288,11 +321,11 @@ def run(cfg: core.Config, emit: Callable[[str, dict], None], stop: threading.Eve
                         seg.revision += 1
                         revision = seg.revision
                         purge_obsolete_jobs()
-                        queue_len = len(jobs)
+                        queue_len = len(high_jobs)
                         frag = seg.fragments[0]
                     elif remainder:
                         purge_obsolete_jobs()
-                        if len(jobs) >= 12:
+                        if len(high_jobs) + len(low_jobs) >= 16:
                             dropped["translation"] += 1
                             emit("translation_skipped", {"id": seg.id, "reason": "queue full; stopping to avoid lost words"})
                             raise RuntimeError("Translation queue full; session stopped to avoid losing words")
@@ -300,10 +333,11 @@ def run(cfg: core.Config, emit: Callable[[str, dict], None], stop: threading.Eve
                         seg.fragments.append(frag)
                         seg.revision += 1
                         revision = seg.revision
-                        jobs.append((seg, frag))
+                        high_jobs.append((seg, frag))
                         cv.notify()
-                        queue_len = len(jobs)
-                if frag and frag.status == "queued" and frag in jobs:
+                        queue_len = len(high_jobs)
+                # Correct membership check against tuple list
+                if frag and frag.status == "queued" and any(f is frag for _, f in high_jobs):
                     trace(seg, "queued", fragment_id=frag.id, revision=revision, queue_size=queue_len)
                     emit("coverage", {"id": seg.id, "fragment_id": frag.id, "words": len(remainder),
                                       "queue_size": queue_len})
@@ -323,7 +357,8 @@ def run(cfg: core.Config, emit: Callable[[str, dict], None], stop: threading.Eve
             seg.previous = text
             seg.previous_at = now
             emit("english_partial", {"id": seg.id, "text": text, "stable": stable_text,
-                                     "latency": now - seg.started})
+                                     "latency": now - seg.started,
+                                     "is_filler": seg.is_filler})
             invalidate_from(seg, current)
             with cv:
                 prefix = committed(seg)
@@ -342,7 +377,7 @@ def run(cfg: core.Config, emit: Callable[[str, dict], None], stop: threading.Eve
             candidate = pending[:cut]
             if len(candidate) >= 4 and len({key(word) for word in candidate}) >= 3:
                 trace(seg, "eligible", stable_wait=now - seg.stable_since)
-                enqueue(seg, candidate, " ".join(prefix[-12:]))
+                enqueue(seg, candidate, build_context(prefix))
 
         while not stop.is_set():
             try:
@@ -394,19 +429,62 @@ def run(cfg: core.Config, emit: Callable[[str, dict], None], stop: threading.Eve
                 decoded_samples = last_voiced_sample = decoded_voiced_sample = 0
 
     def translation_worker() -> None:
+        consecutive_high = 0
         while not stop.is_set():
             with cv:
-                while not stop.is_set() and not jobs:
+                while not stop.is_set() and not high_jobs and not low_jobs:
                     cv.wait(timeout=0.2)
                 if stop.is_set():
                     break
-                seg, frag = jobs.pop(0)
-                valid = frag in seg.fragments and not seg.finished
+                now = time.monotonic()
+                # Anti-starvation check: allow one reconciliation if waiting >= 2.0s or after 3 live fragments
+                starved_reconcile = low_jobs and (now - low_jobs[0][2] >= 2.0 or consecutive_high >= 3)
+                if (starved_reconcile or not high_jobs) and low_jobs:
+                    job_kind = "reconcile"
+                    seg, rec_text, rec_queued_at = low_jobs.pop(0)
+                    consecutive_high = 0
+                    valid = not seg.finished and not seg.reconciled
+                else:
+                    job_kind = "fragment"
+                    seg, frag = high_jobs.pop(0)
+                    consecutive_high += 1
+                    valid = frag in seg.fragments and not seg.finished
+
             if not valid:
                 dropped["translation"] += 1
-                emit("translation_skipped", {"id": seg.id, "reason": "obsolete fragment"})
+                emit("translation_skipped", {"id": seg.id, "reason": "obsolete task"})
                 continue
 
+            if job_kind == "reconcile":
+                # Low-priority reconciliation pass
+                rec_wait = time.monotonic() - rec_queued_at
+                trace(seg, "reconciliation_start", queue_wait=rec_wait)
+                rec_start = time.monotonic()
+
+                class RecCancelled:
+                    def is_set(self) -> bool:
+                        with cv:
+                            return stop.is_set() or seg.finished
+
+                try:
+                    reconciled = core.translate_stream(
+                        rec_text, cfg.translation_model,
+                        on_token=lambda t: None,
+                        stop=RecCancelled(),
+                        on_request_start=lambda: None,
+                        context=build_context([])
+                    )
+                    rec_dur = time.monotonic() - rec_start
+                    trace(seg, "reconciliation_done", duration=rec_dur)
+                    with cv:
+                        seg.reconciled = True
+                    maybe_finalize(seg, reconciled_text=reconciled)
+                except Exception as exc:
+                    trace(seg, "reconciliation_failed", error=str(exc))
+                    maybe_finalize(seg)
+                continue
+
+            # High-priority live translation fragment
             now = time.monotonic()
             frag.dequeued_at = now
             wait = now - frag.queued_at
@@ -447,7 +525,8 @@ def run(cfg: core.Config, emit: Callable[[str, dict], None], stop: threading.Eve
                 if first or t_now - last_update >= 0.05:
                     preview = " ".join(part for part in (previous_vi, text) if part).strip()
                     emit("vietnamese_partial", {"id": seg.id, "fragment_id": frag.id, "text": preview,
-                         "revision": revision, "latency": t_now - seg.started, "received_at": t_now})
+                         "revision": revision, "latency": t_now - seg.started, "received_at": t_now,
+                         "is_filler": seg.is_filler})
                     last_update = t_now
 
             req_start = time.monotonic()
@@ -475,39 +554,27 @@ def run(cfg: core.Config, emit: Callable[[str, dict], None], stop: threading.Eve
             emit("vietnamese_partial", {"id": seg.id, "fragment_id": frag.id, "text": preview.strip(),
                  "revision": revision,
                  "latency": (seg.first_vi_token_received_at or done_time) - seg.started,
-                 "received_at": done_time})
+                 "received_at": done_time,
+                 "is_filler": seg.is_filler})
 
-            # Selective lightweight reconciliation:
-            # Check if all fragments are done and if boundaries across fragments require reconciliation
+            # Check if all fragments are done and if reconciliation should be scheduled
             with cv:
                 all_done = (seg.final_english is not None and seg.fragments
                             and all(f.status == "done" for f in seg.fragments)
                             and not seg.finished)
                 should_reconcile = False
-                if all_done and len(seg.fragments) > 1 and not seg.reconciled:
+                if all_done and len(seg.fragments) > 1 and not seg.reconciled and not seg.is_filler:
                     for i in range(len(seg.fragments) - 1):
                         if is_risky_boundary(seg.fragments[i].english, seg.fragments[i + 1].english):
                             should_reconcile = True
                             break
 
             if should_reconcile:
-                trace(seg, "reconciliation_start")
-                reconcile_start = time.monotonic()
-                try:
-                    reconciled = core.translate_stream(
-                        seg.final_english, cfg.translation_model,
-                        on_token=lambda t: None,
-                        stop=cancel,
-                        on_request_start=lambda: None,
-                        context=""
-                    )
-                    trace(seg, "reconciliation_done", duration=time.monotonic() - reconcile_start)
-                    with cv:
-                        seg.reconciled = True
-                    maybe_finalize(seg, reconciled_text=reconciled)
-                except Exception as exc:
-                    trace(seg, "reconciliation_failed", error=str(exc))
-                    maybe_finalize(seg)
+                with cv:
+                    if not seg.reconciled and not seg.finished and not any(s is seg for s, _, _ in low_jobs):
+                        low_jobs.append((seg, seg.final_english, time.monotonic()))
+                        trace(seg, "reconciliation_queued", queue_size=len(low_jobs))
+                        cv.notify()
             else:
                 maybe_finalize(seg)
 
@@ -537,7 +604,7 @@ def run(cfg: core.Config, emit: Callable[[str, dict], None], stop: threading.Eve
                     raise RuntimeError("Headphone output changed; restart")
                 if time.monotonic() >= next_health:
                     with cv:
-                        backlog = len(jobs)
+                        backlog = len(high_jobs) + len(low_jobs)
                     emit("health", {"dropped": dropped.copy(), "translation_backlog": backlog})
                     next_health = time.monotonic() + 5
         if not errors.empty():

@@ -1,4 +1,4 @@
-"""Small desktop view over the local capture and translation pipeline."""
+"""Small desktop view over the local capture and translation pipeline for live meeting following."""
 
 from __future__ import annotations
 
@@ -7,11 +7,12 @@ import statistics
 import sys
 import threading
 import time
+from collections import deque
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QHBoxLayout,
-                               QLabel, QMainWindow, QPushButton, QTextEdit,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFrame,
+                               QHBoxLayout, QLabel, QMainWindow, QPushButton,
+                               QTextEdit, QVBoxLayout, QWidget)
 
 import main as engine
 import live_pipeline
@@ -20,8 +21,8 @@ import live_pipeline
 class Window(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Mac Live Translator")
-        self.resize(760, 540)
+        self.setWindowTitle("Mac Live Translator — Meeting Follow Mode")
+        self.resize(800, 640)
         self.events: queue.Queue[tuple[str, dict]] = queue.Queue(maxsize=512)
         self.event_overflow = threading.Event()
         self.stop_event = threading.Event()
@@ -37,6 +38,7 @@ class Window(QMainWindow):
         self.first_vietnamese_rendered: dict[int, float] = {}
         self.first_vietnamese_received: dict[int, float] = {}
         self.traces: dict[int, dict[str, float]] = {}
+        self.recent_thought_groups: deque[str] = deque(maxlen=2)
         # Stores (first_en, first_vi_rendered, final_vi, first_vi_received)
         self.results: list[tuple[float, float, float, float]] = []
         self.coverage = {"english_words": 0, "covered_words": 0,
@@ -44,11 +46,15 @@ class Window(QMainWindow):
 
         root = QWidget()
         layout = QVBoxLayout(root)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(6)
+
+        # Device selection row
         row = QHBoxLayout()
         self.input = QComboBox()
-        self.input.setMinimumWidth(250)
+        self.input.setMinimumWidth(240)
         self.output = QComboBox()
-        self.output.setMinimumWidth(250)
+        self.output.setMinimumWidth(240)
         for i, dev in enumerate(engine.devices()):
             if dev["max_input_channels"] and "blackhole 2ch" in dev["name"].casefold():
                 self.input.addItem(f"{i}: {dev['name']}", i)
@@ -59,26 +65,61 @@ class Window(QMainWindow):
         row.addWidget(QLabel("Headphones:"))
         row.addWidget(self.output)
         layout.addLayout(row)
+
         self.status = QLabel("Stopped — set macOS Output to a Multi-Output Device containing BlackHole and headphones")
+        self.status.setStyleSheet("color: #555; font-size: 11px;")
         layout.addWidget(self.status)
+
         self.metrics = QLabel("Audio → first EN: —  ·  first VI: —  ·  final VI: —")
+        self.metrics.setStyleSheet("color: #333; font-size: 11px; font-weight: 500;")
         layout.addWidget(self.metrics)
-        self.english = QTextEdit()
-        self.english.setReadOnly(True)
+
+        # --- Meeting Follow Live Focus Container ---
+        focus_box = QFrame()
+        focus_box.setFrameShape(QFrame.Shape.StyledPanel)
+        focus_box.setStyleSheet(
+            "QFrame { background-color: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px; }"
+        )
+        focus_layout = QVBoxLayout(focus_box)
+        focus_layout.setContentsMargins(12, 8, 12, 10)
+        focus_layout.setSpacing(4)
+
+        # Recent Context Thought Groups
+        self.context_label = QLabel("Ngữ cảnh gần nhất: —")
+        self.context_label.setWordWrap(True)
+        self.context_label.setStyleSheet("color: #64748b; font-size: 11px; font-style: italic;")
+        focus_layout.addWidget(self.context_label)
+
+        # Primary Live Vietnamese Caption
+        self.vietnamese_live = QLabel("Chưa có bản dịch trực tiếp")
+        self.vietnamese_live.setWordWrap(True)
+        self.vietnamese_live.setStyleSheet(
+            "color: #0369a1; font-size: 17px; font-weight: 700; min-height: 40px; line-height: 1.3;"
+        )
+        focus_layout.addWidget(self.vietnamese_live)
+
+        # Matching Live English
+        self.english_live = QLabel("Waiting for speech…")
+        self.english_live.setWordWrap(True)
+        self.english_live.setStyleSheet("color: #334155; font-size: 12px;")
+        focus_layout.addWidget(self.english_live)
+
+        layout.addWidget(focus_box)
+
+        # Subtitle history tabs / boxes
+        layout.addWidget(QLabel("Lịch sử bản dịch tiếng Việt (Vietnamese History)"))
         self.vietnamese = QTextEdit()
         self.vietnamese.setReadOnly(True)
-        layout.addWidget(QLabel("Vietnamese translation"))
-        self.vietnamese_live = QLabel("")
-        self.vietnamese_live.setWordWrap(True)
-        layout.addWidget(self.vietnamese_live)
-        layout.addWidget(self.vietnamese)
-        layout.addWidget(QLabel("English transcript"))
-        self.english_live = QLabel("")
-        self.english_live.setWordWrap(True)
-        layout.addWidget(self.english_live)
-        layout.addWidget(self.english)
+        layout.addWidget(self.vietnamese, 1)
+
+        layout.addWidget(QLabel("Biên bản tiếng Anh gốc (English Transcript)"))
+        self.english = QTextEdit()
+        self.english.setReadOnly(True)
+        layout.addWidget(self.english, 1)
+
+        # Bottom controls
         controls = QHBoxLayout()
-        self.start_button = QPushButton("Start")
+        self.start_button = QPushButton("Start Meeting Follow")
         self.stop_button = QPushButton("Stop")
         self.stop_button.setEnabled(False)
         self.top = QCheckBox("Always on top")
@@ -89,6 +130,7 @@ class Window(QMainWindow):
         controls.addWidget(self.stop_button)
         controls.addWidget(self.top)
         layout.addLayout(controls)
+
         self.setCentralWidget(root)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.drain)
@@ -127,12 +169,14 @@ class Window(QMainWindow):
         self.first_vietnamese_rendered.clear()
         self.first_vietnamese_received.clear()
         self.traces.clear()
+        self.recent_thought_groups.clear()
         self.results.clear()
         self.coverage = dict.fromkeys(self.coverage, 0)
         self.english.clear()
         self.vietnamese.clear()
-        self.english_live.clear()
-        self.vietnamese_live.clear()
+        self.context_label.setText("Ngữ cảnh gần nhất: —")
+        self.english_live.setText("Waiting for speech…")
+        self.vietnamese_live.setText("Đang lắng nghe cuộc họp…")
         self.metrics.setText("Audio → first EN: —  ·  first VI: —  ·  final VI: —")
         input_id = self.input.currentData()
         output_id = self.output.currentData()
@@ -167,8 +211,7 @@ class Window(QMainWindow):
         old_position = scrollbar.value()
         old_maximum = scrollbar.maximum()
         view.setPlainText("\n".join(lines))
-        # Follow the newest entry at the top; retain the reader's place when
-        # they have scrolled down into older entries.
+        # Follow newest entry at top, retain position when reader scrolled into history
         if old_position:
             scrollbar.setValue(old_position + scrollbar.maximum() - old_maximum)
         else:
@@ -182,28 +225,35 @@ class Window(QMainWindow):
                 kind, data = self.events.get_nowait()
             except queue.Empty:
                 return
+
             if kind == "english_partial" and data["id"] not in self.final_en_ids:
                 if self.current_id is not None and data["id"] < self.current_id:
                     continue
                 self.current_id = data["id"]
                 self.first_english.setdefault(data["id"], data["latency"])
                 stable = data["stable"]
-                self.english_live.setText(f"Stable: {stable}  |  Hearing: {data['text']}")
+                is_fill = data.get("is_filler", False)
+                if not is_fill:
+                    self.english_live.setText(f"Hearing: {data['text']}  |  Stable: {stable}")
                 rendered_vi = self.first_vietnamese_rendered.get(data["id"])
                 vi_str = f"{rendered_vi:.2f}s" if rendered_vi is not None else "—"
                 self.metrics.setText(f"Audio → first EN: {self.first_english[data['id']]:.2f}s  ·  first VI: {vi_str}  ·  final VI: —")
+
             elif kind == "english_final" and data["id"] not in self.final_en_ids:
                 self.first_english.setdefault(data["id"], data["latency"])
                 self.final_en_ids.add(data["id"])
                 self.current_id = data["id"]
-                self.final_en.insert(0, f"[{data['id']}] {data['text']}")
-                del self.final_en[100:]
+                tag = f"[{data['id']}]" + (" (filler)" if data.get("is_filler") else "")
+                self.final_en.insert(0, f"{tag} {data['text']}")
+                del self.final_en[150:]
                 self.show_history(self.english, self.final_en)
-                self.english_live.clear()
+                if not data.get("is_filler"):
+                    self.english_live.setText(f"Completed: {data['text']}")
                 rendered_vi = self.first_vietnamese_rendered.get(data["id"])
                 vi_str = f"{rendered_vi:.2f}s" if rendered_vi is not None else "—"
                 self.metrics.setText(f"Audio → first EN: {self.first_english[data['id']]:.2f}s  ·  first VI: {vi_str}  ·  final VI: —")
                 self.status.setText(f"Listening · final English {data['latency']:.1f}s")
+
             elif kind == "translation_revision":
                 print(f"REVISION id={data['id']} version={data['revision']}", flush=True)
                 if data["revision"] > self.vi_revisions.get(data["id"], -1):
@@ -213,20 +263,20 @@ class Window(QMainWindow):
                         if preview:
                             self.vietnamese_live.setText(f"[{data['id']}] Bản nháp · {preview}")
                         else:
-                            self.vietnamese_live.clear()
+                            self.vietnamese_live.setText("Đang dịch…")
+
             elif kind == "vietnamese_partial" and data["id"] not in self.final_vi_ids:
                 if data.get("revision", 0) < self.vi_revisions.get(data["id"], -1):
                     continue
                 self.vi_revisions[data["id"]] = data.get("revision", 0)
                 if self.preview_id is not None and data["id"] < self.preview_id:
-                    # Suppressed because a newer segment owns the live label.
-                    # Do not record as rendered.
                     continue
                 self.preview_id = data["id"]
                 now = time.monotonic()
-                self.vietnamese_live.setText(f"[{data['id']}] Bản nháp · {data['text']}")
+                # Do not let pure fillers overwrite substantive meeting thought focus
+                if not data.get("is_filler", False):
+                    self.vietnamese_live.setText(f"[{data['id']}] Bản nháp · {data['text']}")
                 self.first_vietnamese_received.setdefault(data["id"], data["latency"])
-                # Record rendered timestamp only when actually displayed
                 trace = self.traces.setdefault(data["id"], {})
                 origin = trace.get("source_start")
                 if data["id"] not in self.first_vietnamese_rendered:
@@ -237,21 +287,29 @@ class Window(QMainWindow):
                 rendered_lat = self.first_vietnamese_rendered[data["id"]]
                 en_str = f"{first_en:.2f}s" if first_en is not None else "—"
                 self.metrics.setText(f"Audio → first EN: {en_str}  ·  first VI: {rendered_lat:.2f}s  ·  final VI: —")
+
             elif kind == "vietnamese_cancelled":
                 if self.preview_id == data["id"]:
-                    self.vietnamese_live.clear()
+                    self.vietnamese_live.setText("Đang lắng nghe cuộc họp…")
                     self.preview_id = None
+
             elif kind == "vietnamese_final" and data["id"] not in self.final_vi_ids:
                 self.final_vi_ids.add(data["id"])
                 now = time.monotonic()
-                self.final_vi.insert(0, f"[{data['id']}] {data['text']}")
-                del self.final_vi[100:]
+                is_fill = data.get("is_filler", False)
+                tag = f"[{data['id']}]" + (" (filler)" if is_fill else "")
+                self.final_vi.insert(0, f"{tag} {data['text']}")
+                del self.final_vi[150:]
                 self.show_history(self.vietnamese, self.final_vi)
-                if self.preview_id == data["id"]:
-                    self.vietnamese_live.clear()
-                    self.preview_id = None
-                # If no partial was ever rendered (e.g. fast single-word segment or suppressed),
-                # the final line is its first visible Vietnamese text.
+
+                if not is_fill:
+                    # Update recent thought units context
+                    self.recent_thought_groups.append(f"[{data['id']}] {data['text']}")
+                    self.context_label.setText("Ngữ cảnh gần nhất: " + "  •  ".join(self.recent_thought_groups))
+                    if self.preview_id == data["id"]:
+                        self.vietnamese_live.setText(f"[{data['id']}] Hoàn tất · {data['text']}")
+                        self.preview_id = None
+
                 first_rendered = self.first_vietnamese_rendered.get(data["id"])
                 if first_rendered is None:
                     first_rendered = data["latency"]
@@ -286,6 +344,7 @@ class Window(QMainWindow):
                               f"first_token_rendered={elapsed('first_token_rendered')} "
                               f"request_duration={req_dur}", flush=True)
                 self.status.setText(f"Listening · first token {first_rendered:.1f}s · final {data['latency']:.1f}s")
+
             elif kind == "trace":
                 trace = self.traces.setdefault(data["id"], {})
                 trace.setdefault("source_start", data["source_start"])
@@ -296,32 +355,40 @@ class Window(QMainWindow):
                                      if name in {"fragment_id", "revision", "stable_wait", "queue_wait", "queue_size", "request_duration", "duration"})
                     print(f"TRACE id={data['id']} stage={data['stage']} "
                           f"audio_elapsed={data['at'] - data['source_start']:.3f}s {extra}", flush=True)
+
             elif kind == "coverage":
                 print(f"COVERAGE id={data['id']} fragment={data['fragment_id']} "
                       f"english_words={data['words']} backlog={data['queue_size']}", flush=True)
+
             elif kind == "coverage_final":
                 for name in ("english_words", "covered_words", "fragments", "revisions"):
                     self.coverage[name] += data[name]
                 print(f"COVERAGE_FINAL id={data['id']} english_words={data['english_words']} "
                       f"covered_words={data['covered_words']} fragments={data['fragments']} "
                       f"revisions={data['revisions']}", flush=True)
+
             elif kind == "translation_delayed":
                 self.status.setText(f"Listening · translation queue wait {data['wait']:.1f}s")
+
             elif kind == "ollama_stats":
                 frag_info = f" fragment={data['fragment_id']}" if "fragment_id" in data else ""
                 print(f"OLLAMA id={data['id']}{frag_info} load={data['load_ms']:.1f}ms prompt={data['prompt_ms']:.1f}ms eval={data['eval_ms']:.1f}ms", flush=True)
+
             elif kind == "translation_skipped":
                 self.coverage["skipped"] += 1
                 print(f"SKIPPED id={data['id']} reason={data['reason']}", flush=True)
                 if data["reason"] in {"audio overflow", "queue full; stopping to avoid lost words"}:
                     self.status.setText(f"Listening · skipped speech: {data['reason']}")
+
             elif kind == "health" and any(data["dropped"].values()):
                 self.status.setText(f"Listening · dropped {data['dropped']} · translation backlog {data['translation_backlog']}")
+
             elif kind == "status":
                 self.status.setText(data["text"])
+
             elif kind == "stopped":
-                self.vietnamese_live.clear()
-                self.english_live.clear()
+                self.vietnamese_live.setText("Stopped")
+                self.english_live.setText("")
                 self.preview_id = None
                 if self.results:
                     columns = list(zip(*self.results))
