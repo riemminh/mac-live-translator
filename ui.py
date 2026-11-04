@@ -28,15 +28,17 @@ class Window(QMainWindow):
         self.worker: threading.Thread | None = None
         self.final_en: list[str] = []
         self.final_vi: list[str] = []
-        self.current_id = None
+        self.current_id: int | None = None
         self.final_en_ids: set[int] = set()
         self.final_vi_ids: set[int] = set()
         self.vi_revisions: dict[int, int] = {}
         self.preview_id: int | None = None
         self.first_english: dict[int, float] = {}
-        self.first_vietnamese: dict[int, float] = {}
+        self.first_vietnamese_rendered: dict[int, float] = {}
+        self.first_vietnamese_received: dict[int, float] = {}
         self.traces: dict[int, dict[str, float]] = {}
-        self.results: list[tuple[float, float, float]] = []
+        # Stores (first_en, first_vi_rendered, final_vi, first_vi_received)
+        self.results: list[tuple[float, float, float, float]] = []
         self.coverage = {"english_words": 0, "covered_words": 0,
                          "fragments": 0, "revisions": 0, "skipped": 0}
 
@@ -122,7 +124,8 @@ class Window(QMainWindow):
         self.vi_revisions.clear()
         self.preview_id = None
         self.first_english.clear()
-        self.first_vietnamese.clear()
+        self.first_vietnamese_rendered.clear()
+        self.first_vietnamese_received.clear()
         self.traces.clear()
         self.results.clear()
         self.coverage = dict.fromkeys(self.coverage, 0)
@@ -180,11 +183,15 @@ class Window(QMainWindow):
             except queue.Empty:
                 return
             if kind == "english_partial" and data["id"] not in self.final_en_ids:
-                self.first_english.setdefault(data["id"], data["latency"])
+                if self.current_id is not None and data["id"] < self.current_id:
+                    continue
                 self.current_id = data["id"]
+                self.first_english.setdefault(data["id"], data["latency"])
                 stable = data["stable"]
                 self.english_live.setText(f"Stable: {stable}  |  Hearing: {data['text']}")
-                self.metrics.setText(f"Audio → first EN: {self.first_english[data['id']]:.2f}s  ·  first VI: —  ·  final VI: —")
+                rendered_vi = self.first_vietnamese_rendered.get(data["id"])
+                vi_str = f"{rendered_vi:.2f}s" if rendered_vi is not None else "—"
+                self.metrics.setText(f"Audio → first EN: {self.first_english[data['id']]:.2f}s  ·  first VI: {vi_str}  ·  final VI: —")
             elif kind == "english_final" and data["id"] not in self.final_en_ids:
                 self.first_english.setdefault(data["id"], data["latency"])
                 self.final_en_ids.add(data["id"])
@@ -193,47 +200,74 @@ class Window(QMainWindow):
                 del self.final_en[100:]
                 self.show_history(self.english, self.final_en)
                 self.english_live.clear()
-                self.metrics.setText(f"Audio → first EN: {self.first_english[data['id']]:.2f}s  ·  first VI: —  ·  final VI: —")
+                rendered_vi = self.first_vietnamese_rendered.get(data["id"])
+                vi_str = f"{rendered_vi:.2f}s" if rendered_vi is not None else "—"
+                self.metrics.setText(f"Audio → first EN: {self.first_english[data['id']]:.2f}s  ·  first VI: {vi_str}  ·  final VI: —")
                 self.status.setText(f"Listening · final English {data['latency']:.1f}s")
             elif kind == "translation_revision":
                 print(f"REVISION id={data['id']} version={data['revision']}", flush=True)
                 if data["revision"] > self.vi_revisions.get(data["id"], -1):
                     self.vi_revisions[data["id"]] = data["revision"]
                     if self.preview_id == data["id"]:
-                        self.vietnamese_live.clear()
+                        preview = data.get("preview", "")
+                        if preview:
+                            self.vietnamese_live.setText(f"[{data['id']}] Bản nháp · {preview}")
+                        else:
+                            self.vietnamese_live.clear()
             elif kind == "vietnamese_partial" and data["id"] not in self.final_vi_ids:
                 if data.get("revision", 0) < self.vi_revisions.get(data["id"], -1):
                     continue
                 self.vi_revisions[data["id"]] = data.get("revision", 0)
                 if self.preview_id is not None and data["id"] < self.preview_id:
+                    # Suppressed because a newer segment owns the live label.
+                    # Do not record as rendered.
                     continue
                 self.preview_id = data["id"]
+                now = time.monotonic()
                 self.vietnamese_live.setText(f"[{data['id']}] Bản nháp · {data['text']}")
-                self.first_vietnamese.setdefault(data["id"], data["latency"])
-                self.traces.setdefault(data["id"], {}).setdefault("first_token_rendered", time.monotonic())
+                self.first_vietnamese_received.setdefault(data["id"], data["latency"])
+                # Record rendered timestamp only when actually displayed
+                trace = self.traces.setdefault(data["id"], {})
+                origin = trace.get("source_start")
+                if data["id"] not in self.first_vietnamese_rendered:
+                    rendered_lat = (now - origin) if origin is not None else data["latency"]
+                    self.first_vietnamese_rendered[data["id"]] = rendered_lat
+                    trace.setdefault("first_token_rendered", now)
                 first_en = self.first_english.get(data["id"])
-                self.metrics.setText(f"Audio → first EN: {first_en:.2f}s  ·  first VI: {self.first_vietnamese[data['id']]:.2f}s  ·  final VI: —" if first_en is not None else "Audio → first EN: —  ·  first VI: —  ·  final VI: —")
+                rendered_lat = self.first_vietnamese_rendered[data["id"]]
+                en_str = f"{first_en:.2f}s" if first_en is not None else "—"
+                self.metrics.setText(f"Audio → first EN: {en_str}  ·  first VI: {rendered_lat:.2f}s  ·  final VI: —")
             elif kind == "vietnamese_cancelled":
                 if self.preview_id == data["id"]:
                     self.vietnamese_live.clear()
                     self.preview_id = None
             elif kind == "vietnamese_final" and data["id"] not in self.final_vi_ids:
                 self.final_vi_ids.add(data["id"])
+                now = time.monotonic()
                 self.final_vi.insert(0, f"[{data['id']}] {data['text']}")
                 del self.final_vi[100:]
                 self.show_history(self.vietnamese, self.final_vi)
                 if self.preview_id == data["id"]:
                     self.vietnamese_live.clear()
                     self.preview_id = None
-                # A token can arrive for an older segment while a newer draft
-                # owns the live label. In that case the final line is its first
-                # visible Vietnamese text.
-                first = self.first_vietnamese.get(data["id"], data["latency"])
+                # If no partial was ever rendered (e.g. fast single-word segment or suppressed),
+                # the final line is its first visible Vietnamese text.
+                first_rendered = self.first_vietnamese_rendered.get(data["id"])
+                if first_rendered is None:
+                    first_rendered = data["latency"]
+                    self.first_vietnamese_rendered[data["id"]] = first_rendered
+                    self.traces.setdefault(data["id"], {}).setdefault("first_token_rendered", now)
+                first_received = self.first_vietnamese_received.get(
+                    data["id"], data.get("first_token_received_latency", first_rendered)
+                )
                 first_en = self.first_english.get(data["id"])
-                if first is not None and first_en is not None:
-                    self.metrics.setText(f"Audio → first EN: {first_en:.2f}s  ·  first VI: {first:.2f}s  ·  final VI: {data['latency']:.2f}s")
-                    self.results.append((first_en, first, data["latency"]))
-                    print(f"METRIC id={data['id']} audio_to_first_en={first_en:.3f}s audio_to_first_vi={first:.3f}s audio_to_final_vi={data['latency']:.3f}s", flush=True)
+                if first_en is not None:
+                    self.metrics.setText(f"Audio → first EN: {first_en:.2f}s  ·  first VI: {first_rendered:.2f}s  ·  final VI: {data['latency']:.2f}s")
+                    self.results.append((first_en, first_rendered, data["latency"], first_received or first_rendered))
+                    print(f"METRIC id={data['id']} audio_to_first_en={first_en:.3f}s "
+                          f"audio_to_first_vi_rendered={first_rendered:.3f}s "
+                          f"audio_to_first_vi_received={first_received if first_received is not None else first_rendered:.3f}s "
+                          f"audio_to_final_vi={data['latency']:.3f}s", flush=True)
                     trace = self.traces.get(data["id"], {})
                     origin = trace.get("source_start")
                     if origin is not None:
@@ -242,21 +276,24 @@ class Window(QMainWindow):
                             return f"{value - origin:.3f}" if value is not None else "—"
                         queued, dequeued = trace.get("queued"), trace.get("dequeued")
                         wait = f"{dequeued - queued:.3f}" if queued is not None and dequeued is not None else "—"
+                        req_start, done = trace.get("request_start"), trace.get("translation_done")
+                        req_dur = f"{done - req_start:.3f}" if req_start is not None and done is not None else "—"
                         print(f"TRACE id={data['id']} first_en_ready={elapsed('first_en_ready')} "
                               f"stable={elapsed('stable')} eligible={elapsed('eligible')} "
                               f"final_en={elapsed('final_en')} queue_wait={wait} "
                               f"request_start={elapsed('request_start')} "
                               f"first_token_received={elapsed('first_token_received')} "
-                              f"first_token_rendered={elapsed('first_token_rendered')}", flush=True)
-                self.status.setText(f"Listening · first token {first:.1f}s · final {data['latency']:.1f}s" if first is not None else "Listening")
+                              f"first_token_rendered={elapsed('first_token_rendered')} "
+                              f"request_duration={req_dur}", flush=True)
+                self.status.setText(f"Listening · first token {first_rendered:.1f}s · final {data['latency']:.1f}s")
             elif kind == "trace":
                 trace = self.traces.setdefault(data["id"], {})
                 trace.setdefault("source_start", data["source_start"])
                 trace.setdefault(data["stage"], data["at"])
-                if "fragment_id" in data or "stable_wait" in data:
-                    extra = " ".join(f"{name}={value:.3f}s" if name in {"stable_wait", "queue_wait"}
+                if "fragment_id" in data or "stable_wait" in data or "request_duration" in data or "duration" in data:
+                    extra = " ".join(f"{name}={value:.3f}s" if name in {"stable_wait", "queue_wait", "request_duration", "duration"}
                                      else f"{name}={value}" for name, value in data.items()
-                                     if name in {"fragment_id", "revision", "stable_wait", "queue_wait", "queue_size"})
+                                     if name in {"fragment_id", "revision", "stable_wait", "queue_wait", "queue_size", "request_duration", "duration"})
                     print(f"TRACE id={data['id']} stage={data['stage']} "
                           f"audio_elapsed={data['at'] - data['source_start']:.3f}s {extra}", flush=True)
             elif kind == "coverage":
@@ -271,7 +308,8 @@ class Window(QMainWindow):
             elif kind == "translation_delayed":
                 self.status.setText(f"Listening · translation queue wait {data['wait']:.1f}s")
             elif kind == "ollama_stats":
-                print(f"OLLAMA id={data['id']} load={data['load_ms']:.1f}ms prompt={data['prompt_ms']:.1f}ms eval={data['eval_ms']:.1f}ms", flush=True)
+                frag_info = f" fragment={data['fragment_id']}" if "fragment_id" in data else ""
+                print(f"OLLAMA id={data['id']}{frag_info} load={data['load_ms']:.1f}ms prompt={data['prompt_ms']:.1f}ms eval={data['eval_ms']:.1f}ms", flush=True)
             elif kind == "translation_skipped":
                 self.coverage["skipped"] += 1
                 print(f"SKIPPED id={data['id']} reason={data['reason']}", flush=True)
@@ -290,9 +328,10 @@ class Window(QMainWindow):
                     def p95(values: tuple[float, ...]) -> float:
                         ordered = sorted(values)
                         return ordered[max(0, int(0.95 * len(ordered) + 0.999) - 1)]
+                    names = ("first_en", "first_vi_rendered", "final_vi", "first_vi_received")
                     print(f"BENCHMARK n={len(self.results)} " + " ".join(
                         f"{name}_p50={statistics.median(values):.3f}s {name}_p95={p95(values):.3f}s"
-                        for name, values in zip(("first_en", "first_vi", "final_vi"), columns)), flush=True)
+                        for name, values in zip(names, columns)), flush=True)
                 print("COVERAGE_SUMMARY " + " ".join(f"{key}={value}"
                       for key, value in self.coverage.items()), flush=True)
                 self.start_button.setEnabled(True)
