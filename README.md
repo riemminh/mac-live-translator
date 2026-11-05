@@ -1,8 +1,10 @@
-# Mac Live Translator — live English to Vietnamese text
+# Mac Live Translator & Meeting Copilot — live English to Vietnamese text
 
-Local desktop prototype for Apple Silicon macOS. System audio goes through a **Multi-Output Device** containing BlackHole 2ch and your headphones. You continue hearing the original English. The app reads BlackHole, runs cached MLX Whisper and local Ollama TranslateGemma, and shows progressive text. It does not save audio or transcripts.
+Local desktop workspace for Apple Silicon macOS. System audio goes through a **Multi-Output Device** containing BlackHole 2ch and your headphones. You continue hearing the original English. The app reads BlackHole, runs cached MLX Whisper and local Ollama TranslateGemma, and shows progressive real-time bilingual text. It does not save audio or transcripts to disk.
 
-## Install
+---
+
+## 1. Install
 
 ```bash
 brew install uv ffmpeg ollama
@@ -15,32 +17,60 @@ uv run --locked python -c 'from huggingface_hub import snapshot_download; snapsh
 
 First setup needs internet. During a session, Whisper uses cached model files and Ollama is contacted only at `127.0.0.1:11434`. Dependencies live in `pyproject.toml` and `uv.lock`; there is no pip/requirements workflow.
 
-## Route audio
+---
+
+## 2. Route audio
 
 In **Audio MIDI Setup**, create a Multi-Output Device containing **BlackHole 2ch** and your physical headphones. Select it in **System Settings > Sound > Output**. Check that English remains audible in the headphones. In Meet/Zoom, keep your real microphone selected and use the macOS default output. The app refuses text capture if the default output is not named Multi-Output Device. It cannot inspect member devices, so verify them in Audio MIDI Setup.
 
+---
+
+## 3. Unified Desktop Workspace (No Tab Switching)
+
+The redesigned PySide6 desktop interface combines live translation and on-demand AI assistance into a **single, unified macOS dark workspace**:
+
+### Left Panel: Live Translation (Trực tiếp) (~55%)
+- **Recent Context**: Displays the ongoing discussion topic grounded in recent segments.
+- **Hero Live Vietnamese Subtitles**: Real-time streaming translation with high-contrast text and draft-to-final indicators.
+- **Live English Transcript**: Immediate ASR text from MLX Whisper Small.en.
+- **Live Metrics Strip**: Active listening status, first-token latency, final translation latency, and queue backlog.
+- **Transcript History**: Scrollable history with quick toggles (`VI - Bản dịch` / `EN - Transcript`).
+
+### Right Panel: Meeting Copilot (Trợ lý cuộc họp) (~45%)
+- **Quick Question Input**: Ask questions or provide custom focus (overrides automatic question detection).
+- **Smart Question Detection**: Deterministic multi-segment reconstruction for fragmented ASR speech (e.g. `What do you think` + `Sydney?`).
+- **One-Click Actions**:
+  - **Help Me Reply** (Primary): Generates 1–3 short, spoken English sentences grounded in context.
+  - **Explain Context**: Summarizes technical consensus, decisions, and blockers.
+  - **Suggest Question**: Formulates constructive technical questions to ask next.
+  - **Hủy (Cancel)**: Promptly terminates in-flight Claude requests.
+- **Hero Spoken Reply**: Streamed spoken English text ready to be read aloud, with a one-click **Sao chép** (Copy) button.
+- **Vietnamese Meaning & Evidence**: Side-by-side translation of the reply and verified source citations (`[T#id]`, `[DOC#id]`).
+- **Knowledge & Context Chips**: Interactive chips to manage local Markdown/TXT documentation (SQLite FTS5) and review/clear meeting transcripts.
+- **Source Preview & Privacy**: "Xem trước ngữ cảnh" displays the exact immutable prompt and excerpts before transmission. Cloud opt-in remains disabled by default.
+
+---
+
+## 4. How to Run on Mac
+
+### Launch Redesigned Desktop App:
 ```bash
-uv run --locked python main.py --list-devices
 uv run --locked python ui.py
 ```
 
-The desktop app provides two complementary modes:
+### List Detected Audio Devices:
+```bash
+uv run --locked python main.py --list-devices
+```
 
-### Tab 1: Live Translation (Trực tiếp)
-Follow English meetings with progressive, low-latency Vietnamese subtitles. System audio captured via BlackHole 2ch decodes through local MLX Whisper Small.en and streams through local Ollama TranslateGemma 4B. A dedicated Live Focus Card displays recent thought-unit context, real-time Vietnamese previews, and matching live English.
+### Verify Compilation:
+```bash
+uv run --locked python -m compileall -q mac_live_translator
+```
 
-### Tab 2: Meeting Copilot (Trợ lý cuộc họp)
-When participating in technical discussions, click **Help Me Reply**, **Explain Context**, or **Suggest Question** to generate concise, natural English spoken replies (1–3 sentences), complete with Vietnamese explanation and matched source citations:
-- **Meeting Context**: In-memory `MeetingContextStore` tracks finalized transcript segments (`[T#id]`).
-- **Knowledge Base**: Load Markdown (`.md`) and text (`.txt`) files or project documentation directories indexed locally in RAM via SQLite FTS5 (`[DOC#id]`).
-- **Claude Haiku 5.5**: Streams spoken answers on explicit user click using the official Anthropic Python SDK (`claude-haiku-5-5`).
-- **Privacy & Security**: Cloud assistance requires explicit user opt-in (unchecked by default). On demand, ~3 minutes of recent context plus relevant older excerpts and documentation chunks are retrieved; transcripts and documentation are held strictly in RAM and never saved to disk. The live translator remains 100% operational offline without API keys.
+---
 
-The first-VI metric now means the first **visible draft token**. Its latency must be evaluated together with draft accuracy and the final-VI metric; it is not directly comparable with an earlier policy that waited for stable English before requesting translation.
-
-The legacy spoken mode remains optional: `uv run --locked python main.py --speak --output-device "Your headphones"`. It requires macOS output set to BlackHole 2ch and an installed Vietnamese voice (see `docs/legacy/README_LEGACY_MVP.md`). Do not use a Multi-Output Device for spoken replacement mode.
-
-## Manual checks
+## 5. Manual checks
 
 1. Confirm `--list-devices` shows BlackHole and the headphones, and the system default output is the Multi-Output Device.
 2. Play a clear English YouTube talk. Confirm the original stays audible, and provisional English appears before a finalized line.
@@ -50,7 +80,9 @@ The legacy spoken mode remains optional: `uv run --locked python main.py --speak
 
 Speech detection uses a light RMS threshold, not a trained VAD; music and noise can still trigger Whisper. Provisional decodes need at least 0.45 s of new audio and are spaced at least 0.75 s apart. There is no artificial 200 ms stability timer: stability requires two Whisper hypotheses. The final pass reuses the latest provisional result when no new speech arrived. Capture uses 20 ms blocks and an eight-second bounded buffer; an overload drops old audio and visibly cancels the current draft. The translation queue is bounded and the app stops with an error if it fills rather than silently omitting speech. Overlapping windows cost compute and may revise provisional text. Fragmented Vietnamese may have awkward word order; review the final lines for accuracy. Model speed and actual lag must be measured on the target Mac. Bluetooth reconnects can change device indices. Nothing is persisted by this app, but Terminal output can be saved if you redirect it.
 
-## Five-minute YouTube benchmark
+---
+
+## 6. Five-minute YouTube benchmark
 
 1. Connect the same headphones, use the same Multi-Output route, close other heavy applications, and run `uv run --locked python ui.py` in Terminal. Keep Whisper Small.en and TranslateGemma 4B unchanged. Wait for **Listening** so both models are warm.
 2. Open [the benchmark clip at 176 seconds](https://www.youtube.com/watch?v=Wb8dxOUDtCs&t=176s). Keep playback at 1× and the same volume; do not pause or seek during the five-minute interval.

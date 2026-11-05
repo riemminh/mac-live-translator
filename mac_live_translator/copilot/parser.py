@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import re
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from mac_live_translator.copilot.models import CopilotResult
 
 
 def extract_citations(text: str) -> list[str]:
@@ -17,7 +21,7 @@ def parse_copilot_response(raw_text: str) -> tuple[str, str, list[str], list[str
     evidence: list[str] = []
     warnings: list[str] = []
 
-    sections = re.split(r"###\s+", raw_text)
+    sections = re.split(r"(?:\r?\n|^)#{1,4}\s+", raw_text)
     for sec in sections:
         sec = sec.strip()
         if not sec:
@@ -63,3 +67,17 @@ def match_citations(
 
     return matched, unverified
 
+
+def format_evidence_text(result: CopilotResult) -> str:
+    """Format matched citations and caveats into human-readable text."""
+    ev_lines: list[str] = []
+    if result.evidence_citations:
+        ev_lines.append("Trích dẫn khớp nguồn trích đoạn:")
+        ev_lines.extend(f" • {c}" for c in result.evidence_citations)
+    if result.unverified_citations:
+        ev_lines.append("\nCảnh báo trích dẫn không có trong nguồn:")
+        ev_lines.extend(f" ⚠️ {c}" for c in result.unverified_citations)
+    if result.warnings:
+        ev_lines.append("\nLưu ý & Điểm chưa rõ:")
+        ev_lines.extend(f" ℹ️ {w}" for w in result.warnings)
+    return "\n".join(ev_lines) if ev_lines else "Không có trích dẫn bổ sung."

@@ -5,7 +5,8 @@ from __future__ import annotations
 import threading
 from PySide6.QtCore import QThread, Signal
 
-from mac_live_translator.copilot.assistant import CopilotResult, MeetingAssistant
+from mac_live_translator.copilot.assistant import MeetingAssistant
+from mac_live_translator.copilot.models import CopilotResult, PreparedCopilotRequest
 from mac_live_translator.knowledge.store import KnowledgeStore
 
 
@@ -18,15 +19,17 @@ class CopilotWorker(QThread):
     def __init__(
         self,
         assistant: MeetingAssistant,
-        action_type: str,
-        user_query: str | None,
-        unconfirmed_live: str,
+        action_type: str = "help_me_reply",
+        user_query: str | None = None,
+        unconfirmed_live: str = "",
+        prepared_request: PreparedCopilotRequest | None = None,
     ) -> None:
         super().__init__()
         self.assistant = assistant
         self.action_type = action_type
         self.user_query = user_query
         self.unconfirmed_live = unconfirmed_live
+        self.prepared_request = prepared_request
         self.stop_event = threading.Event()
 
     def cancel(self) -> None:
@@ -36,13 +39,20 @@ class CopilotWorker(QThread):
     def run(self) -> None:
         """Run request in background thread and emit Qt signals."""
         try:
-            result = self.assistant.process_request(
-                action_type=self.action_type,
-                user_query=self.user_query,
-                unconfirmed_live_text=self.unconfirmed_live,
-                on_text=lambda token: self.chunk_received.emit(token),
-                stop_event=self.stop_event,
-            )
+            if self.prepared_request is not None:
+                result = self.assistant.execute_prepared_request(
+                    prepared=self.prepared_request,
+                    on_text=lambda token: self.chunk_received.emit(token),
+                    stop_event=self.stop_event,
+                )
+            else:
+                result = self.assistant.process_request(
+                    action_type=self.action_type,
+                    user_query=self.user_query,
+                    unconfirmed_live_text=self.unconfirmed_live,
+                    on_text=lambda token: self.chunk_received.emit(token),
+                    stop_event=self.stop_event,
+                )
             if not self.stop_event.is_set():
                 self.finished_success.emit(result)
         except Exception as exc:
@@ -67,4 +77,3 @@ class KnowledgeIndexWorker(QThread):
             self.indexing_done.emit(added, self.path)
         except Exception as exc:
             self.indexing_failed.emit(str(exc))
-

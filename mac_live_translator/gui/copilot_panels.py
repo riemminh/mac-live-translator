@@ -1,4 +1,4 @@
-"""Dialogs, file pickers, and knowledge indexing for Meeting Copilot."""
+"""Dialogs, file pickers, and settings managers for Meeting Copilot."""
 
 from __future__ import annotations
 
@@ -7,7 +7,9 @@ from typing import TYPE_CHECKING, Callable
 from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
+    QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPushButton,
     QTextEdit,
@@ -15,34 +17,142 @@ from PySide6.QtWidgets import (
 )
 
 from mac_live_translator.gui.workers import KnowledgeIndexWorker
-from mac_live_translator.meeting.context import MeetingContextStore
 
 if TYPE_CHECKING:
     from mac_live_translator.gui.window import Window
 
 
-def review_context_snapshot_dialog(win: Window) -> None:
-    """Display dialog previewing recent meeting transcript excerpts sent to Claude."""
-    recent = win.context_store.get_recent_snapshot(seconds=180.0, max_segments=30)
-    unconfirmed = win.english_live.text()
-    formatted = MeetingContextStore.format_for_prompt(recent, unconfirmed)
+def open_settings_dialog(win: Window) -> None:
+    """Dialog for configuring Anthropic API Key and model preferences."""
     dlg = QDialog(win)
-    dlg.setWindowTitle("Xem trước ngữ cảnh gửi tới Claude")
-    dlg.resize(600, 450)
+    dlg.setWindowTitle("Cài đặt Claude AI & API Key")
+    dlg.resize(460, 220)
     layout = QVBoxLayout(dlg)
-    layout.addWidget(QLabel("Dưới đây là nội dung trích đoạn gần nhất (~3 phút) sẽ được gửi kèm câu hỏi:"))
+    layout.setSpacing(10)
+
+    layout.addWidget(QLabel("Anthropic API Key:"))
+    key_input = QLineEdit()
+    key_input.setEchoMode(QLineEdit.EchoMode.Password)
+    key_input.setPlaceholderText("sk-ant-api03-...")
+    if win.claude_client.api_key:
+        key_input.setText(win.claude_client.api_key)
+    layout.addWidget(key_input)
+
+    btn_row = QHBoxLayout()
+    btn_show = QPushButton("Hiện/Ẩn Key")
+    def toggle() -> None:
+        key_input.setEchoMode(QLineEdit.EchoMode.Normal if key_input.echoMode() == QLineEdit.EchoMode.Password else QLineEdit.EchoMode.Password)
+    btn_show.clicked.connect(toggle)
+    btn_row.addWidget(btn_show)
+    btn_row.addStretch()
+
+    btn_save = QPushButton("Lưu cấu hình")
+    def save() -> None:
+        win.claude_client.api_key = key_input.text().strip()
+        win.ai_status_pill.setText("🟢 AI sẵn sàng\nClaude (Cloud)" if win.claude_client.is_configured() else "⚪ AI chưa cấu hình")
+        dlg.accept()
+    btn_save.clicked.connect(save)
+    btn_row.addWidget(btn_save)
+    layout.addLayout(btn_row)
+
+    info = QLabel("Quyền riêng tư: API Key được lưu tạm trong bộ nhớ session, không ghi đè vào tệp công khai.")
+    info.setStyleSheet("color: #94a3b8; font-size: 11px;")
+    info.setWordWrap(True)
+    layout.addWidget(info)
+    dlg.exec()
+
+
+def open_knowledge_dialog(win: Window) -> None:
+    """Compact dialog managing loaded Markdown and TXT documentation."""
+    dlg = QDialog(win)
+    dlg.setWindowTitle("Quản lý tài liệu tham chiếu (Knowledge Files)")
+    dlg.resize(480, 320)
+    layout = QVBoxLayout(dlg)
+    files = win.knowledge_store.get_loaded_files()
+
+    layout.addWidget(QLabel(f"Danh sách tệp đã lập chỉ mục ({len(files)} tệp, {win.knowledge_store.get_chunk_count()} đoạn):"))
     txt = QTextEdit()
     txt.setReadOnly(True)
-    txt.setPlainText(formatted if formatted else "Chưa có biên bản nào được ghi nhận.")
+    txt.setPlainText("\n".join(f"• {f}" for f in files) if files else "Chưa nạp tài liệu nào (.md, .txt).")
     layout.addWidget(txt)
-    btn = QPushButton("Đóng")
-    btn.clicked.connect(dlg.accept)
-    layout.addWidget(btn)
+
+    btn_row = QHBoxLayout()
+    btn_add_file = QPushButton("+ Thêm tệp")
+    btn_add_file.clicked.connect(lambda: (add_knowledge_file_dialog(win, win.copilot_actions.index_knowledge_path), dlg.accept()))
+    btn_add_dir = QPushButton("+ Thêm thư mục")
+    btn_add_dir.clicked.connect(lambda: (add_knowledge_folder_dialog(win, win.copilot_actions.index_knowledge_path), dlg.accept()))
+    btn_clear = QPushButton("Xóa tất cả")
+    btn_clear.clicked.connect(lambda: (win.copilot_actions.clear_knowledge(), dlg.accept()))
+    btn_row.addWidget(btn_add_file)
+    btn_row.addWidget(btn_add_dir)
+    btn_row.addWidget(btn_clear)
+    layout.addLayout(btn_row)
+    dlg.exec()
+
+
+def review_context_snapshot_dialog(win: Window) -> None:
+    """Display dialog previewing the exact immutable context snapshot prepared for Claude."""
+    user_query = win.question_input.text().strip() or None
+    unconfirmed = win.english_live.text().strip()
+    if unconfirmed == "Waiting for speech…":
+        unconfirmed = ""
+
+    prepared = win.assistant.prepare_request(
+        action_type="help_me_reply",
+        user_query=user_query,
+        unconfirmed_live_text=unconfirmed,
+    )
+    win.last_prepared_request = prepared
+
+    dlg = QDialog(win)
+    dlg.setWindowTitle("Xem trước nội dung gửi tới Claude (Source & Privacy Preview)")
+    dlg.resize(680, 500)
+    layout = QVBoxLayout(dlg)
+
+    info_lbl = QLabel(
+        "<b>Kiểm tra nội dung thực tế trước khi gửi lên Claude Haiku API:</b><br>"
+        "Chỉ các trích đoạn biên bản và tài liệu dưới đây được chuyển giao. "
+        "Không gửi toàn bộ thư mục hoặc thông tin tài khoản."
+    )
+    info_lbl.setWordWrap(True)
+    info_lbl.setStyleSheet("color: #e2e8f0; font-size: 11px;")
+    layout.addWidget(info_lbl)
+
+    sections = []
+    if prepared.detected_question:
+        src_tags = ", ".join(f"T#{sid}" for sid in prepared.detected_question.source_ids)
+        sections.append(f"[TỰ ĐỘNG PHÁT HIỆN CÂU HỎI ({src_tags})]\n{prepared.effective_query}\n")
+    else:
+        sections.append(f"[CÂU HỎI / YÊU CẦU]: {prepared.effective_query}\n")
+
+    sections.append(
+        f"[BIÊN BẢN GẦN NHẤT: {len(prepared.recent_segments)} câu | "
+        f"LỊCH SỬ CŨ: {len(prepared.older_segments)} câu | "
+        f"TÀI LIỆU: {len(prepared.retrieved_docs)} đoạn | "
+        f"Chuẩn bị: {prepared.context_prep_duration * 1000:.1f}ms]"
+    )
+    sections.append("\n" + "=" * 60 + "\nNỘI DUNG PROMPT HOÀN CHỈNH SẼ GỬI LÊN CLAUDE:\n" + "=" * 60)
+    sections.append(prepared.user_prompt)
+
+    txt = QTextEdit()
+    txt.setReadOnly(True)
+    txt.setPlainText("\n".join(sections))
+    txt.setStyleSheet("font-family: monospace; font-size: 11px; background-color: #17151e; color: #e2e8f0;")
+    layout.addWidget(txt)
+
+    btn_row = QHBoxLayout()
+    btn_send = QPushButton("🚀 Gửi dữ liệu này tới Claude ngay")
+    btn_send.setStyleSheet("font-weight: bold; background-color: #6d28d9; color: white; padding: 6px 12px;")
+    btn_send.clicked.connect(lambda: (dlg.accept(), win.copilot_actions.trigger_copilot_with_prepared(prepared)))
+    btn_close = QPushButton("Đóng")
+    btn_close.clicked.connect(dlg.reject)
+    btn_row.addWidget(btn_send)
+    btn_row.addWidget(btn_close)
+    layout.addLayout(btn_row)
     dlg.exec()
 
 
 def clear_meeting_context_dialog(win: Window, on_cleared: Callable[[], None]) -> None:
-    """Prompt user confirmation before resetting meeting transcript memory."""
     reply = QMessageBox.question(
         win,
         "Xác nhận xóa biên bản",
@@ -54,32 +164,18 @@ def clear_meeting_context_dialog(win: Window, on_cleared: Callable[[], None]) ->
 
 
 def add_knowledge_file_dialog(win: Window, on_index_path: Callable[[str], None]) -> None:
-    """Open file picker for Markdown and TXT documentation."""
-    paths, _ = QFileDialog.getOpenFileNames(
-        win,
-        "Chọn tệp tài liệu hỗ trợ",
-        "",
-        "Documents (*.md *.markdown *.txt)",
-    )
+    paths, _ = QFileDialog.getOpenFileNames(win, "Chọn tệp tài liệu hỗ trợ", "", "Documents (*.md *.markdown *.txt)")
     for p in paths:
         on_index_path(p)
 
 
 def add_knowledge_folder_dialog(win: Window, on_index_path: Callable[[str], None]) -> None:
-    """Open directory picker for documentation folder."""
     folder = QFileDialog.getExistingDirectory(win, "Chọn thư mục tài liệu")
     if folder:
         on_index_path(folder)
 
 
-def clear_knowledge_action(win: Window) -> None:
-    """Clear in-memory knowledge database and update UI label."""
-    win.knowledge_store.clear()
-    win.knowledge_status.setText("Tài liệu (.md, .txt): 0 tệp (0 đoạn)")
-
-
 def index_knowledge_path(win: Window, path: str) -> None:
-    """Start background worker to index selected file or folder into SQLite FTS5."""
     win.knowledge_status.setText(f"Đang nạp: {Path(path).name}…")
     worker = KnowledgeIndexWorker(win.knowledge_store, path)
     win.indexing_workers.add(worker)
@@ -89,14 +185,14 @@ def index_knowledge_path(win: Window, path: str) -> None:
 
 
 def on_indexing_done(win: Window, added: int, path: str, worker: KnowledgeIndexWorker) -> None:
-    """Handle successful document indexing completion."""
     win.indexing_workers.discard(worker)
     files = win.knowledge_store.get_loaded_files()
     chunks = win.knowledge_store.get_chunk_count()
-    win.knowledge_status.setText(f"Tài liệu (.md, .txt): {len(files)} tệp ({chunks} đoạn)")
+    if hasattr(win, "knowledge_badge"):
+        win.knowledge_badge.setText(f"{len(files)} tệp")
+    win.knowledge_status.setText(f"{len(files)} tệp ({chunks} đoạn) >")
 
 
 def on_indexing_failed(win: Window, err: str, worker: KnowledgeIndexWorker) -> None:
-    """Handle document indexing error and update status."""
     win.indexing_workers.discard(worker)
     win.knowledge_status.setText(f"Lỗi nạp: {err}")

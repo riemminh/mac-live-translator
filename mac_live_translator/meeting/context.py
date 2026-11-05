@@ -7,8 +7,12 @@ import threading
 import time
 from collections import OrderedDict
 
-from mac_live_translator.meeting.models import TranscriptEntry
-from mac_live_translator.meeting.retrieval import format_transcript_for_prompt, tokenize_query
+from mac_live_translator.meeting.models import DetectedQuestion, TranscriptEntry
+from mac_live_translator.meeting.question import reconstruct_question_from_segments
+from mac_live_translator.meeting.retrieval import (
+    extract_topic_keywords,
+    format_transcript_for_prompt,
+)
 
 
 class MeetingContextStore:
@@ -33,13 +37,11 @@ class MeetingContextStore:
         cleaned = text.strip()
         if not cleaned:
             return
-        now_mono = time.monotonic()
-        now_wall = time.time()
         entry = TranscriptEntry(
             id=segment_id,
             text=cleaned,
-            monotonic_at=now_mono,
-            wall_at=now_wall,
+            monotonic_at=time.monotonic(),
+            wall_at=time.time(),
             is_filler=is_filler,
         )
         with self._lock:
@@ -66,15 +68,22 @@ class MeetingContextStore:
                 recent = list(self._entries.values())[-max_segments:]
             return recent
 
+    def detect_recent_question(self, max_segments: int = 15) -> DetectedQuestion | None:
+        """Detect and reconstruct the most recent question within finalized segments."""
+        with self._lock:
+            recent = list(self._entries.values())[-max_segments:]
+        return reconstruct_question_from_segments(recent)
+
     def search_relevant(
         self,
         query: str,
-        top_k: int = 6,
+        top_k: int = 4,
         include_neighbors: bool = True,
         exclude_ids: set[int] | None = None,
+        max_words: int = 350,
     ) -> list[TranscriptEntry]:
-        """Deterministic keyword search over transcript history with neighbor context."""
-        keywords = tokenize_query(query)
+        """Deterministic keyword search over older transcript history with neighbor context."""
+        keywords = extract_topic_keywords(query)
         if not keywords:
             return []
 
@@ -86,38 +95,51 @@ class MeetingContextStore:
 
         excluded = exclude_ids or set()
         id_to_idx = {entry.id: idx for idx, entry in enumerate(entries)}
-        id_to_entry = {entry.id: entry for entry in entries}
         scores: list[tuple[float, int]] = []
 
         for entry in entries:
-            if entry.id in excluded:
+            if entry.id in excluded or entry.is_filler:
                 continue
             entry_words = {w.casefold() for w in re.findall(r"\b[A-Za-z0-9_+#.-]+\b", entry.text)}
             matched = keywords.intersection(entry_words)
-            if matched:
-                score = len(matched)
-                if any(k.isupper() or len(k) > 4 for k in matched):
-                    score += 0.5
-                scores.append((score, entry.id))
+            if not matched:
+                continue
+
+            # Require multi-word match if query has multiple keywords, unless matching a salient term
+            has_salient = any(len(k) >= 5 or any(c.isupper() for c in k) for k in matched)
+            if len(keywords) >= 2 and len(matched) < 2 and not has_salient:
+                continue
+
+            score = len(matched) * 1.5 + (1.0 if has_salient else 0.0)
+            scores.append((score, entry.id))
 
         scores.sort(key=lambda x: x[0], reverse=True)
         top_ids = [seg_id for _, seg_id in scores[:top_k]]
-
-        if not include_neighbors:
-            return [id_to_entry[i] for i in sorted(top_ids) if i in id_to_entry]
+        if not top_ids:
+            return []
 
         result_indices: set[int] = set()
         for seg_id in top_ids:
-            if seg_id in id_to_idx:
-                idx = id_to_idx[seg_id]
-                result_indices.add(idx)
-                if idx > 0:
+            idx = id_to_idx[seg_id]
+            result_indices.add(idx)
+            if include_neighbors:
+                if idx > 0 and entries[idx - 1].id not in excluded:
                     result_indices.add(idx - 1)
-                if idx + 1 < len(entries):
+                if idx + 1 < len(entries) and entries[idx + 1].id not in excluded:
                     result_indices.add(idx + 1)
 
-        sorted_indices = sorted(result_indices)
-        return [entries[i] for i in sorted_indices]
+        sorted_entries = [entries[i] for i in sorted(result_indices)]
+        # Bound by max_words budget
+        budgeted: list[TranscriptEntry] = []
+        word_count = 0
+        for entry in sorted_entries:
+            cnt = len(entry.text.split())
+            if word_count + cnt > max_words and budgeted:
+                break
+            budgeted.append(entry)
+            word_count += cnt
+
+        return sorted(budgeted, key=lambda e: e.id)
 
     def get_context_summary(self) -> dict:
         """Return summary statistics of the meeting context store."""
@@ -137,4 +159,3 @@ class MeetingContextStore:
     def format_for_prompt(entries: list[TranscriptEntry], unconfirmed_text: str = "") -> str:
         """Format transcript entries into prompt string."""
         return format_transcript_for_prompt(entries, unconfirmed_text)
-

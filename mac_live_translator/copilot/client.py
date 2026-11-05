@@ -20,6 +20,7 @@ class ClaudeUsage:
     output_tokens: int = 0
     time_to_first_token: float = 0.0
     total_duration: float = 0.0
+    context_prep_duration: float = 0.0
     model: str = CLAUDE_MODEL
 
 
@@ -35,7 +36,7 @@ class ClaudeClient:
         self,
         api_key: str | None = None,
         model: str = CLAUDE_MODEL,
-        max_tokens: int = 1024,
+        max_tokens: int = 2048,
     ) -> None:
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "").strip()
         self.model = model

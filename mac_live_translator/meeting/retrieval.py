@@ -26,6 +26,10 @@ STOPWORDS = {
     "while", "who", "who's", "whom", "why", "why's", "with", "won't", "would",
     "wouldn't", "you", "you'd", "you'll", "you're", "you've", "your", "yours",
     "yourself", "yourselves",
+    # Conversational fillers and non-substantive speech tokens
+    "think", "thought", "thoughts", "say", "said", "saying", "know", "see",
+    "saw", "look", "make", "made", "want", "like", "just", "well", "also",
+    "really", "kind", "sort", "head", "nods", "couple", "yeah", "okay",
 }
 
 
@@ -33,6 +37,17 @@ def tokenize_query(query: str) -> set[str]:
     """Extract informative lowercase keywords from query string."""
     words = re.findall(r"\b[A-Za-z0-9_+#.-]+\b", query.casefold())
     return {w for w in words if len(w) > 1 and w not in STOPWORDS}
+
+
+def extract_topic_keywords(text: str) -> set[str]:
+    """Extract domain keywords, technical terms, and salient tokens from text."""
+    words = re.findall(r"\b[A-Za-z0-9_+#.-]+\b", text)
+    salient: set[str] = set()
+    for w in words:
+        wl = w.casefold()
+        if len(wl) > 1 and wl not in STOPWORDS:
+            salient.add(wl)
+    return salient
 
 
 def format_transcript_for_prompt(
@@ -47,4 +62,3 @@ def format_transcript_for_prompt(
     if unconfirmed_text.strip():
         lines.append(f"[T#LIVE-UNCONFIRMED]: {unconfirmed_text.strip()}")
     return "\n".join(lines)
-
