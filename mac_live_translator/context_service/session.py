@@ -8,9 +8,9 @@ from collections import OrderedDict
 from typing import Any
 
 from mac_live_translator.context_service.fts_store import SessionFTSStore
+from mac_live_translator.context_service.memory_bridge import merge_analysis_into_memory
 from mac_live_translator.context_service.models import BatchClaim, MeaningCard
 from mac_live_translator.meeting.context import MeetingContextStore
-from mac_live_translator.meeting.memory_models import MeetingMemory, MemoryItem
 from mac_live_translator.meeting.memory_store import CompactedMemoryStore
 
 
@@ -45,6 +45,7 @@ class SessionContext:
         self.analyzed_segment_ids: set[int] = set()
         self.pending_segment_ids: list[int] = []
         self.last_analysis_attempt_time = 0.0
+        self.last_analysis_success_wall_time = 0.0
         self.batch_start_monotonic = 0.0
         self.is_analyzing = False
         self.active_claim_id = 0
@@ -65,6 +66,7 @@ class SessionContext:
             self.analyzed_segment_ids.clear()
             self.pending_segment_ids.clear()
             self.last_analysis_attempt_time = 0.0
+            self.last_analysis_success_wall_time = 0.0
             self.batch_start_monotonic = 0.0
             self.is_analyzing = False
             self.active_claim_id = 0
@@ -122,17 +124,10 @@ class SessionContext:
                 self.is_analyzing = False
 
     def commit_analysis(
-        self,
-        claim: BatchClaim,
-        topic: str,
-        pinned_question: str | None,
-        new_cards: list[MeaningCard],
-        decisions: list[dict[str, Any]],
-        proposals: list[dict[str, Any]],
-        action_items: list[dict[str, Any]],
-        open_questions: list[dict[str, Any]],
-        key_facts: list[dict[str, Any]],
-        overview: str = "",
+        self, claim: BatchClaim, topic: str, pinned_question: str | None,
+        new_cards: list[MeaningCard], decisions: list[dict[str, Any]], proposals: list[dict[str, Any]],
+        action_items: list[dict[str, Any]], open_questions: list[dict[str, Any]],
+        key_facts: list[dict[str, Any]], overview: str = "",
     ) -> bool:
         """Commit validated analysis results atomically if generation is still active."""
         with self.lock:
@@ -159,35 +154,38 @@ class SessionContext:
             if action_items:
                 self.action_items = (action_items + self.action_items)[:15]
 
-            # Merge all semantic categories into CompactedMemoryStore
-            current_mem = self.memory_store.get_memory()
-            u_dec = [MemoryItem(text=d["text"], source_ids=d.get("source_ids", []), status="confirmed") for d in decisions]
-            u_prop = [MemoryItem(text=p["text"], source_ids=p.get("source_ids", []), status="proposed") for p in proposals]
-            u_act = [
-                MemoryItem(
-                    text=a["text"], source_ids=a.get("source_ids", []),
-                    owner=a.get("owner", ""), deadline=a.get("deadline", ""),
-                    status=a.get("status", "confirmed"),
-                ) for a in action_items
-            ]
-            u_q = [MemoryItem(text=q["text"], source_ids=q.get("source_ids", [])) for q in open_questions]
-            u_facts = [MemoryItem(text=f["text"], source_ids=f.get("source_ids", [])) for f in key_facts]
-
-            merged_mem = MeetingMemory(
-                overview=overview or current_mem.overview,
-                topics=current_mem.topics,
-                decisions=(u_dec + current_mem.decisions)[:25],
-                proposals=(u_prop + current_mem.proposals)[:25],
-                action_items=(u_act + current_mem.action_items)[:25],
-                open_questions=(u_q + current_mem.open_questions)[:25],
-                risks_blockers=current_mem.risks_blockers,
-                key_facts=(u_facts + current_mem.key_facts)[:25],
-                last_compacted_id=max(claim.batch_ids) if claim.batch_ids else current_mem.last_compacted_id,
-                compaction_version=current_mem.compaction_version + 1,
-            )
-            self.memory_store.commit_compaction(
-                session_id=self.memory_store.get_session_id(),
-                new_memory=merged_mem,
-                max_batch_id=max(claim.batch_ids) if claim.batch_ids else 0,
+            self.last_analysis_success_wall_time = time.time()
+            merge_analysis_into_memory(
+                memory_store=self.memory_store,
+                decisions=decisions,
+                proposals=proposals,
+                action_items=action_items,
+                open_questions=open_questions,
+                key_facts=key_facts,
+                overview=overview,
+                batch_ids=claim.batch_ids,
             )
             return True
+
+    def get_cooldown_remaining(self, min_interval: float = 15.0) -> float:
+        """Remaining seconds before the next analysis is eligible."""
+        with self.lock:
+            if self.last_analysis_attempt_time > 0:
+                now = time.monotonic()
+                return max(0.0, min_interval - (now - self.last_analysis_attempt_time))
+            return 0.0
+
+    def get_last_analyzed_id(self) -> int | None:
+        """Max segment ID successfully committed, or None if none."""
+        with self.lock:
+            return max(self.analyzed_segment_ids) if self.analyzed_segment_ids else None
+
+    def count_meaningful_pending(self) -> int:
+        """Count pending segments that are not fillers."""
+        with self.lock:
+            count = 0
+            for sid in self.pending_segment_ids:
+                seg = self.fts_store.get_segment(sid)
+                if seg and not seg.is_filler:
+                    count += 1
+            return count

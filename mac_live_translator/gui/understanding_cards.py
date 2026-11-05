@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from mac_live_translator.context_service.models import MeaningCard
 
@@ -24,12 +24,12 @@ class MeaningCardWidget(QFrame):
         super().__init__()
         self.card_id = card.card_id
         self.setStyleSheet(
-            "QFrame { background-color: #1a1622; border: 1px solid #342e42; border-radius: 8px; } "
-            "QFrame:hover { border-color: #6366f1; }"
+            "QFrame { background-color: #1b1726; border: 1px solid #362e45; border-radius: 8px; } "
+            "QFrame:hover { border-color: #6366f1; background-color: #1e192c; }"
         )
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 8, 10, 8)
-        layout.setSpacing(4)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(6)
 
         # Header Row
         head_layout = QHBoxLayout()
@@ -48,9 +48,9 @@ class MeaningCardWidget(QFrame):
         head_layout.addStretch()
 
         if card.source_ids:
-            src_str = ", ".join(f"T#{i}" for i in card.source_ids[:3])
-            src_lbl = QLabel(f"[{src_str}]")
-            src_lbl.setStyleSheet("color: #64748b; font-size: 10px; font-family: monospace;")
+            src_str = " · ".join(f"T#{i}" for i in card.source_ids[:3])
+            src_lbl = QLabel(src_str)
+            src_lbl.setStyleSheet("color: #64748b; font-size: 9px; font-weight: 500;")
             head_layout.addWidget(src_lbl)
 
         layout.addLayout(head_layout)
@@ -59,20 +59,48 @@ class MeaningCardWidget(QFrame):
         hl_lbl = QLabel(card.headline)
         hl_lbl.setWordWrap(True)
         hl_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        hl_lbl.setStyleSheet("color: #ffffff; font-size: 13px; font-weight: 700; line-height: 1.3;")
+        hl_lbl.setStyleSheet("color: #ffffff; font-size: 14px; font-weight: 700; line-height: 1.35;")
         layout.addWidget(hl_lbl)
 
-        # Bullet points
+        # Bullet points with collapsible secondary bullets
         if card.bullet_points:
-            bullet_box = QVBoxLayout()
-            bullet_box.setSpacing(2)
-            for b in card.bullet_points[:2]:
-                b_lbl = QLabel(f"• {b}")
-                b_lbl.setWordWrap(True)
-                b_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-                b_lbl.setStyleSheet("color: #cbd5e1; font-size: 11px; line-height: 1.25; margin-left: 2px;")
-                bullet_box.addWidget(b_lbl)
-            layout.addLayout(bullet_box)
+            first_b = card.bullet_points[0]
+            b1_lbl = QLabel(f"• {first_b}")
+            b1_lbl.setWordWrap(True)
+            b1_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            b1_lbl.setStyleSheet("color: #cbd5e1; font-size: 11px; line-height: 1.3;")
+            layout.addWidget(b1_lbl)
+
+            sec_bullets = card.bullet_points[1:3]
+            if sec_bullets:
+                sec_box = QWidget()
+                sec_layout = QVBoxLayout(sec_box)
+                sec_layout.setContentsMargins(0, 0, 0, 0)
+                sec_layout.setSpacing(2)
+                for b in sec_bullets:
+                    sub_lbl = QLabel(f"• {b}")
+                    sub_lbl.setWordWrap(True)
+                    sub_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+                    sub_lbl.setStyleSheet("color: #94a3b8; font-size: 11px; line-height: 1.25; margin-left: 4px;")
+                    sec_layout.addWidget(sub_lbl)
+                sec_box.setVisible(False)
+                layout.addWidget(sec_box)
+
+                btn_toggle = QPushButton(f"▸ Xem thêm {len(sec_bullets)} chi tiết")
+                btn_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+                btn_toggle.setStyleSheet(
+                    "QPushButton { background: transparent; border: none; color: #818cf8; "
+                    "font-size: 10px; font-weight: 600; text-align: left; padding: 1px 0; } "
+                    "QPushButton:hover { color: #a5b4fc; text-decoration: underline; }"
+                )
+
+                def on_toggle(b=sec_box, btn=btn_toggle, n=len(sec_bullets)) -> None:
+                    vis = not b.isVisible()
+                    b.setVisible(vis)
+                    btn.setText("▾ Thu gọn" if vis else f"▸ Xem thêm {n} chi tiết")
+
+                btn_toggle.clicked.connect(on_toggle)
+                layout.addWidget(btn_toggle)
 
 
 class CompactDecisionWidget(QFrame):

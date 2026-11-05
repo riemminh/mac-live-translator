@@ -103,6 +103,7 @@ class Window(QMainWindow):
         self.understanding_opt_in.toggled.connect(u.on_opt_in_toggled)
         self.freeze_checkbox.toggled.connect(u.on_freeze_toggled)
         self.btn_catchup.clicked.connect(u.on_catchup_clicked)
+        u.bind_ui()
 
     def toggle_top(self, checked: bool) -> None:
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, checked)

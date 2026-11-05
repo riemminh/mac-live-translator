@@ -121,6 +121,22 @@ class CatchupData:
 
 
 @dataclass
+class UnderstandingStatus:
+    """Current analysis and scheduling status for Visual Meeting Understanding."""
+    cloud_opt_in: bool
+    is_analyzing: bool
+    pending_count: int
+    meaningful_pending: int
+    last_analyzed_id: int | None
+    last_success_time: float
+    cooldown_remaining: float
+    state: str
+    next_eligible_desc: str
+    auto_update_enabled: bool = True
+    last_error: str = ""
+
+
+@dataclass
 class SearchResult:
     """Transcript search match with segment metadata."""
     segment_id: int

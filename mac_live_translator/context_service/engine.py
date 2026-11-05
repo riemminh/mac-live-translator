@@ -3,18 +3,21 @@
 from __future__ import annotations
 
 import threading
+import time
 import uuid
 from typing import Any
 
-from mac_live_translator.context_service.analyzer import (
-    SinglePassAnalysisResult,
-    execute_single_pass_analysis,
+from mac_live_translator.context_service.analysis_pipeline import (
+    evaluate_understanding_status,
+    run_session_analysis,
 )
+from mac_live_translator.context_service.analyzer import SinglePassAnalysisResult
 from mac_live_translator.context_service.models import (
     BatchClaim,
     CatchupData,
     SearchResult,
     UnderstandingFeed,
+    UnderstandingStatus,
 )
 from mac_live_translator.context_service.session import SessionContext
 from mac_live_translator.copilot.client import ClaudeClient
@@ -86,63 +89,23 @@ class ContextEngine:
         return session.ingest_segment(segment_id, text, is_filler)
 
     def trigger_analysis(
-        self,
-        session_id: str,
-        force: bool = False,
-        stop_event: threading.Event | None = None,
+        self, session_id: str, force: bool = False, stop_event: threading.Event | None = None
     ) -> tuple[SinglePassAnalysisResult, BatchClaim] | None:
         """Atomically claim eligible batch and execute analysis outside the lock."""
         session = self.get_session(session_id)
         if not session or not self.cloud_opt_in or not self.client.is_configured():
             return None
-
         claim = session.claim_pending_batch(min_size=1 if force else 5, force=force)
         if not claim:
             return None
+        return run_session_analysis(session, self.client, claim, stop_event)
 
-        try:
-            batch_segs = [session.fts_store.get_segment(i) for i in claim.batch_ids]
-            valid_segs = [s for s in batch_segs if s is not None and not s.is_filler]
-            if not valid_segs:
-                session.release_claim(claim)
-                return None
-
-            batch_text = "\n".join(f"[T#{s.segment_id}] {s.text}" for s in valid_segs)
-            older_matches = session.fts_store.search(session.current_topic, top_k=3)
-            evidence_segs = [m for m in older_matches if m.segment_id not in claim.batch_ids]
-            older_text = "\n".join(f"[T#{m.segment_id}] {m.text}" for m in evidence_segs)
-
-            valid_ids = {s.segment_id for s in valid_segs}.union(m.segment_id for m in evidence_segs)
-            mem = session.memory_store.get_memory()
-            mem_summary = mem.format_for_prompt(max_words=300) if not mem.is_empty() else ""
-
-            result = execute_single_pass_analysis(
-                client=self.client,
-                batch_text=batch_text,
-                valid_segment_ids=valid_ids,
-                current_topic=session.current_topic,
-                memory_summary=mem_summary,
-                older_evidence=older_text,
-                starting_card_id=session.next_card_id,
-                stop_event=stop_event,
-            )
-
-            committed = session.commit_analysis(
-                claim=claim,
-                topic=result.topic,
-                pinned_question=result.pinned_question,
-                new_cards=result.meaning_cards,
-                decisions=result.decisions,
-                proposals=result.proposals,
-                action_items=result.action_items,
-                open_questions=result.open_questions,
-                key_facts=result.key_facts,
-                overview=result.memory_overview,
-            )
-            return (result, claim) if committed else None
-        except Exception:
-            session.release_claim(claim)
-            raise
+    def get_understanding_status(
+        self, session_id: str = "default", auto_update: bool = True, last_error: str = ""
+    ) -> UnderstandingStatus:
+        """Authoritatively evaluate current understanding metrics, state, and next eligibility."""
+        session = self.get_session(session_id)
+        return evaluate_understanding_status(session, self.cloud_opt_in, auto_update, last_error)
 
     def get_feed(self, session_id: str, last_read_card_id: int = 0) -> UnderstandingFeed | None:
         session = self.get_session(session_id)

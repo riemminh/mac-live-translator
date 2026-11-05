@@ -15,6 +15,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from mac_live_translator.gui.understanding_dashboard import create_understanding_dashboard
+
 if TYPE_CHECKING:
     from mac_live_translator.gui.window import Window
 
@@ -26,35 +28,56 @@ def create_understanding_panel(window: Window) -> QWidget:
     layout.setContentsMargins(0, 4, 0, 0)
     layout.setSpacing(6)
 
-    # Cloud Opt-in & Privacy Bar
+    # Controls Bar: Cloud Opt-In, Auto Update toggle & Manual Update Button
     opt_card = QFrame()
     opt_card.setStyleSheet("background-color: #1a1622; border: 1px solid #2e283b; border-radius: 6px;")
     opt_layout = QHBoxLayout(opt_card)
     opt_layout.setContentsMargins(8, 4, 8, 4)
+    opt_layout.setSpacing(8)
 
-    window.understanding_opt_in = QCheckBox("☁️ Bật phân tích hiểu cuộc họp (Cloud Understanding Opt-In)")
+    window.understanding_opt_in = QCheckBox("☁️ Quyền Claude (Opt-In)")
     window.understanding_opt_in.setChecked(False)
     window.understanding_opt_in.setStyleSheet("color: #f1f5f9; font-size: 11px; font-weight: 600;")
     opt_layout.addWidget(window.understanding_opt_in)
+
+    window.understanding_auto_update = QCheckBox("🔄 Tự động (Auto)")
+    window.understanding_auto_update.setChecked(True)
+    window.understanding_auto_update.setStyleSheet("color: #cbd5e1; font-size: 11px;")
+    opt_layout.addWidget(window.understanding_auto_update)
     opt_layout.addStretch()
 
-    window.understanding_status_lbl = QLabel("⚪ Ngoại tuyến (Offline)")
-    window.understanding_status_lbl.setStyleSheet("color: #94a3b8; font-size: 10px;")
-    opt_layout.addWidget(window.understanding_status_lbl)
+    window.btn_manual_analyze = QPushButton("🔄 Cập nhật ngay")
+    window.btn_manual_analyze.setCursor(Qt.CursorShape.PointingHandCursor)
+    window.btn_manual_analyze.setStyleSheet(
+        "QPushButton { background-color: #4f46e5; color: white; font-weight: 700; "
+        "font-size: 11px; padding: 4px 10px; border-radius: 5px; } "
+        "QPushButton:hover { background-color: #4338ca; } "
+        "QPushButton:disabled { background-color: #312e81; color: #6b7280; }"
+    )
+    opt_layout.addWidget(window.btn_manual_analyze)
+
+    window.understanding_status_lbl = QLabel("")
+    window.understanding_status_lbl.setVisible(False)
     layout.addWidget(opt_card)
 
-    # Topic Card
+    # Real-time Status Dashboard
+    layout.addWidget(create_understanding_dashboard(window))
+
+    # Prominent Topic Card
     topic_card = QFrame()
-    topic_card.setStyleSheet("background-color: #1a1622; border: 1px solid #342e42; border-radius: 8px;")
-    t_layout = QHBoxLayout(topic_card)
-    t_layout.setContentsMargins(10, 6, 10, 6)
-    t_lbl_prefix = QLabel("📌 Chủ đề:")
-    t_lbl_prefix.setStyleSheet("color: #a78bfa; font-weight: 700; font-size: 11px;")
+    topic_card.setStyleSheet(
+        "background-color: #1c152e; border: 1px solid #4f46e5; border-left: 4px solid #818cf8; border-radius: 8px;"
+    )
+    t_layout = QVBoxLayout(topic_card)
+    t_layout.setContentsMargins(12, 7, 12, 7)
+    t_layout.setSpacing(2)
+    t_lbl_prefix = QLabel("📌 CHỦ ĐỀ CUỘC HỌP HIỆN TẠI")
+    t_lbl_prefix.setStyleSheet("color: #a78bfa; font-weight: 800; font-size: 10px; letter-spacing: 0.5px;")
     t_layout.addWidget(t_lbl_prefix)
     window.topic_label = QLabel("Đang lắng nghe để xác định chủ đề…")
-    window.topic_label.setStyleSheet("color: #ffffff; font-weight: 700; font-size: 12px;")
+    window.topic_label.setStyleSheet("color: #ffffff; font-weight: 800; font-size: 13px; line-height: 1.3;")
     window.topic_label.setWordWrap(True)
-    t_layout.addWidget(window.topic_label, 1)
+    t_layout.addWidget(window.topic_label)
     layout.addWidget(topic_card)
 
     # Pinned Question Banner (hidden by default)
