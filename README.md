@@ -30,15 +30,15 @@ The desktop app provides two complementary modes:
 Follow English meetings with progressive, low-latency Vietnamese subtitles. System audio captured via BlackHole 2ch decodes through local MLX Whisper Small.en and streams through local Ollama TranslateGemma 4B. A dedicated Live Focus Card displays recent thought-unit context, real-time Vietnamese previews, and matching live English.
 
 ### Tab 2: Meeting Copilot (Trợ lý cuộc họp)
-When participating in technical discussions, click **Help Me Reply**, **Explain Context**, or **Suggest Question** to generate concise, natural English spoken replies (1–3 sentences), complete with Vietnamese explanation and verified citations:
+When participating in technical discussions, click **Help Me Reply**, **Explain Context**, or **Suggest Question** to generate concise, natural English spoken replies (1–3 sentences), complete with Vietnamese explanation and matched source citations:
 - **Meeting Context**: In-memory `MeetingContextStore` tracks finalized transcript segments (`[T#id]`).
 - **Knowledge Base**: Load Markdown (`.md`) and text (`.txt`) files or project documentation directories indexed locally in RAM via SQLite FTS5 (`[DOC#id]`).
-- **Claude Haiku 5.5**: Streams answers on explicit user click using Anthropic API (`claude-haiku-5-5` / `claude-3-5-haiku-20241022`).
-- **Privacy & Security**: Cloud assistance requires explicit opt-in. Only ~3 minutes of recent context and relevant excerpts are transmitted on request; transcripts are never written to disk. The translator remains 100% operational offline without API keys.
+- **Claude Haiku 5.5**: Streams spoken answers on explicit user click using the official Anthropic Python SDK (`claude-haiku-5-5`).
+- **Privacy & Security**: Cloud assistance requires explicit user opt-in (unchecked by default). On demand, ~3 minutes of recent context plus relevant older excerpts and documentation chunks are retrieved; transcripts and documentation are held strictly in RAM and never saved to disk. The live translator remains 100% operational offline without API keys.
 
 The first-VI metric now means the first **visible draft token**. Its latency must be evaluated together with draft accuracy and the final-VI metric; it is not directly comparable with an earlier policy that waited for stable English before requesting translation.
 
-The legacy spoken mode remains optional: `uv run --locked python main.py --speak --output-device "Your headphones"`. It requires macOS output set to BlackHole 2ch and an installed Vietnamese voice. Do not use a Multi-Output Device for spoken replacement mode.
+The legacy spoken mode remains optional: `uv run --locked python main.py --speak --output-device "Your headphones"`. It requires macOS output set to BlackHole 2ch and an installed Vietnamese voice (see `docs/legacy/README_LEGACY_MVP.md`). Do not use a Multi-Output Device for spoken replacement mode.
 
 ## Manual checks
 
