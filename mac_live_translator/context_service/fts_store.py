@@ -10,7 +10,7 @@ from mac_live_translator.context_service.models import SearchResult, TranscriptS
 
 
 class SessionFTSStore:
-    """Thread-safe SQLite FTS5 index for finalized transcript segments."""
+    """Thread-safe SQLite FTS5 index for finalized transcript segments with strict idempotency."""
 
     def __init__(self, max_segments: int = 2000) -> None:
         self._max_segments = max_segments
@@ -45,7 +45,7 @@ class SessionFTSStore:
         self._init_db()
 
     def add_segment(self, segment_id: int, text: str, is_filler: bool = False) -> bool:
-        """Insert or replace a finalized English segment idempotently."""
+        """Insert or update a finalized English segment idempotently. Identical replay is a no-op."""
         cleaned = text.strip()
         if not cleaned:
             return False
@@ -60,8 +60,11 @@ class SessionFTSStore:
         with self._lock:
             if self._db is None:
                 return False
-            # Idempotency: remove previous row if existing
+
             if segment_id in self._segments:
+                existing = self._segments[segment_id]
+                if existing.text == cleaned and existing.is_filler == is_filler:
+                    return False  # Strict idempotency: identical segment replay is no-op
                 self._db.execute("DELETE FROM transcript_fts WHERE segment_id = ?", (str(segment_id),))
 
             self._segments[segment_id] = seg
@@ -139,4 +142,3 @@ class SessionFTSStore:
                     break
 
         return results
-

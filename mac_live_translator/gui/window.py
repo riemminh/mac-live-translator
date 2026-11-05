@@ -50,7 +50,9 @@ class Window(QMainWindow):
         self.knowledge_store = KnowledgeStore()
         self.claude_client = ClaudeClient(api_key=os.environ.get("ANTHROPIC_API_KEY", "").strip())
         self.assistant = MeetingAssistant(self.context_store, self.knowledge_store, self.claude_client, self.memory_store)
-        self.context_engine = ContextEngine(client=self.claude_client)
+        self.context_engine = ContextEngine(
+            client=self.claude_client, default_context_store=self.context_store, default_memory_store=self.memory_store
+        )
         self.understanding_controller = UnderstandingController(self)
         self.copilot_worker, self.compaction_worker = None, None
         self.indexing_workers: set[KnowledgeIndexWorker] = set()
@@ -140,7 +142,7 @@ class Window(QMainWindow):
             self.listening_badge.setText("🟢 Đang nghe (Listening)")
         self.context_store.clear()
         self.memory_store.clear()
-        self.context_engine.delete_session("default")
+        self.context_engine.reset_session("default")
         self.understanding_controller.reset()
         self.copilot_actions.update_context_status()
         self.copilot_generation_id += 1

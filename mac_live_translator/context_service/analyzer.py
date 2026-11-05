@@ -15,6 +15,9 @@ from mac_live_translator.context_service.prompts import (
 )
 from mac_live_translator.copilot.client import ClaudeClient, ClaudeUsage
 
+ALLOWED_CATEGORIES = {"key_point", "decision", "proposal", "question", "action"}
+ALLOWED_STATUSES = {"confirmed", "proposed", "unclear"}
+
 
 @dataclass
 class SinglePassAnalysisResult:
@@ -26,6 +29,7 @@ class SinglePassAnalysisResult:
     proposals: list[dict[str, Any]]
     action_items: list[dict[str, Any]]
     open_questions: list[dict[str, Any]]
+    key_facts: list[dict[str, Any]]
     memory_overview: str
     usage: ClaudeUsage
     raw_response: str
@@ -44,14 +48,14 @@ def clean_json_text(raw_text: str) -> str:
 
 
 def filter_valid_source_ids(raw_ids: Any, valid_set: set[int]) -> list[int]:
-    """Ensure cited source IDs actually exist in the session's transcript."""
+    """Ensure cited source IDs actually exist in the supplied batch or evidence."""
     if not isinstance(raw_ids, list):
         return []
-    res = []
+    res: list[int] = []
     for x in raw_ids:
         try:
             val = int(x)
-            if val in valid_set:
+            if val in valid_set and val not in res:
                 res.append(val)
         except (ValueError, TypeError):
             continue
@@ -68,7 +72,7 @@ def execute_single_pass_analysis(
     starting_card_id: int = 1,
     stop_event: threading.Event | None = None,
 ) -> SinglePassAnalysisResult:
-    """Execute single-pass Claude Haiku analysis and validate output independently."""
+    """Execute single-pass Claude Haiku analysis with strict schema and citation validation."""
     user_prompt = build_analysis_user_prompt(
         batch_text=batch_text,
         current_topic=current_topic,
@@ -91,24 +95,27 @@ def execute_single_pass_analysis(
     if not isinstance(data, dict):
         raise ValueError("Model output did not contain a JSON object.")
 
-    topic = str(data.get("topic", "")).strip() or current_topic or "Chủ đề kỹ thuật chung"
+    topic = str(data.get("topic", "")).strip()[:100] or current_topic or "Chủ đề kỹ thuật chung"
     pinned_q = data.get("pinned_question")
-    pinned_question = str(pinned_q).strip() if pinned_q and str(pinned_q).strip() else None
+    pinned_question = str(pinned_q).strip()[:180] if pinned_q and str(pinned_q).strip() else None
 
     # Parse and validate meaning cards
     cards: list[MeaningCard] = []
     card_id = starting_card_id
     raw_cards = data.get("meaning_cards", [])
     if isinstance(raw_cards, list):
-        for rc in raw_cards:
+        for rc in raw_cards[:6]:
             if not isinstance(rc, dict):
                 continue
-            hl = str(rc.get("headline", "")).strip()
+            hl = str(rc.get("headline", "")).strip()[:200]
             if not hl:
                 continue
-            bullets = [str(b).strip() for b in rc.get("bullet_points", []) if str(b).strip()]
-            cat = str(rc.get("category", "key_point")).strip()
-            imp = str(rc.get("importance", "normal")).strip()
+            raw_bullets = rc.get("bullet_points", [])
+            bullets = [str(b).strip()[:250] for b in raw_bullets if str(b).strip()][:3] if isinstance(raw_bullets, list) else []
+            cat = str(rc.get("category", "key_point")).strip().lower()
+            if cat not in ALLOWED_CATEGORIES:
+                cat = "key_point"
+            imp = "high" if str(rc.get("importance", "")).strip().lower() == "high" else "normal"
             src_ids = filter_valid_source_ids(rc.get("source_ids", []), valid_segment_ids)
             cards.append(MeaningCard(
                 card_id=card_id,
@@ -121,22 +128,23 @@ def execute_single_pass_analysis(
             ))
             card_id += 1
 
-    def parse_items(key: str) -> list[dict[str, Any]]:
+    def parse_items(key: str, max_items: int = 5) -> list[dict[str, Any]]:
         raw_list = data.get(key, [])
         if not isinstance(raw_list, list):
             return []
         items = []
-        for it in raw_list:
+        for it in raw_list[:max_items]:
             if not isinstance(it, dict) or not str(it.get("text", "")).strip():
                 continue
             srcs = filter_valid_source_ids(it.get("source_ids", []), valid_segment_ids)
-            item_dict: dict[str, Any] = {"text": str(it["text"]).strip(), "source_ids": srcs}
+            item_dict: dict[str, Any] = {"text": str(it["text"]).strip()[:250], "source_ids": srcs}
             if "owner" in it:
-                item_dict["owner"] = str(it.get("owner", "")).strip()
+                item_dict["owner"] = str(it.get("owner", "")).strip()[:50]
             if "deadline" in it:
-                item_dict["deadline"] = str(it.get("deadline", "")).strip()
+                item_dict["deadline"] = str(it.get("deadline", "")).strip()[:50]
             if "status" in it:
-                item_dict["status"] = str(it.get("status", "confirmed")).strip()
+                st = str(it.get("status", "confirmed")).strip().lower()
+                item_dict["status"] = st if st in ALLOWED_STATUSES else "confirmed"
             items.append(item_dict)
         return items
 
@@ -148,8 +156,8 @@ def execute_single_pass_analysis(
         proposals=parse_items("proposals"),
         action_items=parse_items("action_items"),
         open_questions=parse_items("open_questions"),
-        memory_overview=str(data.get("memory_overview", "")).strip(),
+        key_facts=parse_items("key_facts"),
+        memory_overview=str(data.get("memory_overview", "")).strip()[:300],
         usage=usage,
         raw_response=raw_text,
     )
-

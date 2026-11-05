@@ -146,7 +146,7 @@ class CompactionWorker(QThread):
 
 class UnderstandingAnalysisWorker(QThread):
     """Background worker executing single-pass Claude understanding analysis."""
-    analysis_done = Signal(object)
+    analysis_done = Signal(object, object)
     analysis_failed = Signal(str)
 
     def __init__(
@@ -166,13 +166,14 @@ class UnderstandingAnalysisWorker(QThread):
 
     def run(self) -> None:
         try:
-            result = self.engine.trigger_analysis(
+            outcome = self.engine.trigger_analysis(
                 session_id=self.session_id,
                 force=self.force,
                 stop_event=self.stop_event,
             )
-            if not self.stop_event.is_set() and result is not None:
-                self.analysis_done.emit(result)
+            if not self.stop_event.is_set() and outcome is not None:
+                res, claim = outcome
+                self.analysis_done.emit(res, claim)
         except Exception as exc:
             if not self.stop_event.is_set():
                 self.analysis_failed.emit(str(exc))

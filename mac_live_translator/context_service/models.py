@@ -16,6 +16,16 @@ class TranscriptSegment:
     wall_at: float = field(default_factory=time.time)
 
 
+@dataclass(frozen=True)
+class BatchClaim:
+    """Atomic batch claim token for single-worker Claude analysis."""
+    session_id: str
+    generation_id: int
+    batch_ids: list[int]
+    claim_id: int
+    created_at: float
+
+
 @dataclass
 class MeaningCard:
     """Concise meaning card representing one key discussion point in Vietnamese."""
@@ -60,6 +70,7 @@ class MeaningCard:
 class UnderstandingFeed:
     """Current state of the understanding feed for the visual UI."""
     session_id: str
+    generation_id: int = 1
     topic: str = "Đang xác định chủ đề…"
     pinned_question: str | None = None
     recent_cards: list[MeaningCard] = field(default_factory=list)
@@ -74,6 +85,7 @@ class UnderstandingFeed:
     def to_dict(self) -> dict[str, Any]:
         return {
             "session_id": self.session_id,
+            "generation_id": self.generation_id,
             "topic": self.topic,
             "pinned_question": self.pinned_question,
             "recent_cards": [c.to_dict() for c in self.recent_cards],
@@ -89,11 +101,13 @@ class UnderstandingFeed:
 
 @dataclass
 class CatchupData:
-    """Catch-up payload for unread meaning cards."""
+    """Catch-up payload for unread meaning cards with deterministic pagination."""
     unread_cards: list[MeaningCard] = field(default_factory=list)
     summary: str = ""
     last_read_card_id: int = 0
     unread_count: int = 0
+    remaining_unread: int = 0
+    has_more: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -101,6 +115,8 @@ class CatchupData:
             "summary": self.summary,
             "last_read_card_id": self.last_read_card_id,
             "unread_count": self.unread_count,
+            "remaining_unread": self.remaining_unread,
+            "has_more": self.has_more,
         }
 
 
@@ -119,4 +135,3 @@ class SearchResult:
             "wall_at": self.wall_at,
             "score": self.score,
         }
-
