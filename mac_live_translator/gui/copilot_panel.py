@@ -94,10 +94,10 @@ def create_copilot_panel(window: Window) -> QWidget:
     window.context_badge.setStyleSheet("background-color: #064e3b; color: #a7f3d0; font-size: 10px; font-weight: 700; border-radius: 4px; padding: 1px 6px;")
     c_top.addWidget(window.context_badge)
     c_layout.addLayout(c_top)
-    window.context_status = QLabel("Biên bản cuộc họp hiện tại >")
+    window.context_status = QLabel("Biên bản & trí nhớ thu gọn >")
     window.context_status.setStyleSheet("font-size: 10px; color: #94a3b8;")
     c_layout.addWidget(window.context_status)
-    c_card.mousePressEvent = lambda _: window.copilot_actions.review_context_snapshot()
+    c_card.mousePressEvent = lambda _: window.copilot_actions.open_memory_dialog()
     store_row.addWidget(c_card)
     layout.addLayout(store_row)
 

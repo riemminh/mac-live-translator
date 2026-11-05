@@ -44,8 +44,12 @@ class CopilotActionsHandler:
     def open_knowledge_dialog(self) -> None:
         open_knowledge_dialog(self.win)
 
+    def open_memory_dialog(self) -> None:
+        from mac_live_translator.gui.memory_dialog import open_memory_dialog
+        open_memory_dialog(self.win)
+
     def clear_knowledge(self) -> None:
-        clear_knowledge_action(self.win)
+        self.win.knowledge_store.clear()
         if hasattr(self.win, "knowledge_badge"):
             self.win.knowledge_badge.setText("0 tệp")
             self.win.knowledge_status.setText("Quản lý tệp tri thức >")
@@ -63,6 +67,8 @@ class CopilotActionsHandler:
                 self.win.copilot_worker.cancel()
                 self.reset_copilot_buttons()
             self.win.context_store.clear()
+            if hasattr(self.win, "memory_store"):
+                self.win.memory_store.clear()
             self.win.recent_thought_groups.clear()
             self.win.context_label.setText("Chưa có ngữ cảnh")
             if hasattr(self.win, "context_badge"):
@@ -76,10 +82,13 @@ class CopilotActionsHandler:
 
     def update_context_status(self) -> None:
         stats = self.win.context_store.get_context_summary()
+        mem_sum = self.win.memory_store.get_compaction_summary() if hasattr(self.win, "memory_store") else {}
+        ver = mem_sum.get("compaction_version", 0)
+        ver_tag = f" · Trí nhớ v{ver}" if ver > 0 else ""
         if hasattr(self.win, "context_badge"):
-            self.win.context_badge.setText(f"{stats['total_segments']} câu / {stats['total_words']} từ")
+            self.win.context_badge.setText(f"{stats['total_segments']} câu / {stats['total_words']} từ{ver_tag}")
         self.win.context_status.setText(
-            f"Biên bản cuộc họp: {stats['total_segments']} câu ({stats['total_words']} từ) >"
+            f"Biên bản: {stats['total_segments']} câu ({stats['total_words']} từ){ver_tag} >"
         )
 
     def copy_english_answer(self) -> None:
@@ -123,29 +132,19 @@ class CopilotActionsHandler:
         self.win.copilot_generation_id += 1
         current_gen = self.win.copilot_generation_id
 
-        self.win.btn_help_reply.setEnabled(False)
-        self.win.btn_explain.setEnabled(False)
-        self.win.btn_suggest.setEnabled(False)
+        for b in (self.win.btn_help_reply, self.win.btn_explain, self.win.btn_suggest):
+            b.setEnabled(False)
         self.win.btn_cancel_copilot.setEnabled(True)
-        self.win.english_answer_view.clear()
-        self.win.vietnamese_meaning_view.clear()
-        self.win.evidence_view.clear()
+        for v in (self.win.english_answer_view, self.win.vietnamese_meaning_view, self.win.evidence_view):
+            v.clear()
         self.win.copilot_metrics.setText(f"Copilot: Đang kết nối tới Claude Haiku ({prepared.action_type})…")
 
-        self.win.copilot_worker = CopilotWorker(
-            assistant=self.win.assistant,
-            prepared_request=prepared,
-        )
-        self.win.copilot_worker.chunk_received.connect(
-            lambda token, gen=current_gen: self.on_copilot_token(token, gen)
-        )
-        self.win.copilot_worker.finished_success.connect(
-            lambda res, gen=current_gen: self.on_copilot_success(res, gen)
-        )
-        self.win.copilot_worker.failed_error.connect(
-            lambda err, gen=current_gen: self.on_copilot_error(err, gen)
-        )
-        self.win.copilot_worker.start()
+        worker = CopilotWorker(assistant=self.win.assistant, prepared_request=prepared)
+        self.win.copilot_worker = worker
+        worker.chunk_received.connect(lambda t, g=current_gen: self.on_copilot_token(t, g))
+        worker.finished_success.connect(lambda r, g=current_gen: self.on_copilot_success(r, g))
+        worker.failed_error.connect(lambda e, g=current_gen: self.on_copilot_error(e, g))
+        worker.start()
 
     def cancel_copilot(self) -> None:
         self.win.copilot_generation_id += 1
@@ -183,7 +182,6 @@ class CopilotActionsHandler:
         self.reset_copilot_buttons()
 
     def reset_copilot_buttons(self) -> None:
-        self.win.btn_help_reply.setEnabled(True)
-        self.win.btn_explain.setEnabled(True)
-        self.win.btn_suggest.setEnabled(True)
+        for b in (self.win.btn_help_reply, self.win.btn_explain, self.win.btn_suggest):
+            b.setEnabled(True)
         self.win.btn_cancel_copilot.setEnabled(False)

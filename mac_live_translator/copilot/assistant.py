@@ -13,6 +13,7 @@ from mac_live_translator.copilot.prompts import SYSTEM_PROMPT, build_user_prompt
 from mac_live_translator.copilot.streaming import StreamingSectionParser
 from mac_live_translator.knowledge.store import KnowledgeStore
 from mac_live_translator.meeting.context import MeetingContextStore
+from mac_live_translator.meeting.memory_store import CompactedMemoryStore
 from mac_live_translator.meeting.models import DetectedQuestion
 from mac_live_translator.meeting.question import reconstruct_question_from_segments
 
@@ -25,10 +26,12 @@ class MeetingAssistant:
         context_store: MeetingContextStore,
         knowledge_store: KnowledgeStore,
         client: ClaudeClient,
+        memory_store: CompactedMemoryStore | None = None,
     ) -> None:
         self.context_store = context_store
         self.knowledge_store = knowledge_store
         self.client = client
+        self.memory_store = memory_store
 
     def prepare_request(
         self,
@@ -67,9 +70,14 @@ class MeetingAssistant:
         all_segments = sorted(recent_segments + older_relevant, key=lambda s: s.id)
         retrieved_docs = self.knowledge_store.search(effective_query, top_k=4)
 
+        compacted_mem = self.memory_store.get_memory() if self.memory_store else None
+        prompt_mem = compacted_mem.format_for_prompt() if (compacted_mem and not compacted_mem.is_empty()) else ""
+
         prompt_transcript = MeetingContextStore.format_for_prompt(all_segments, unconfirmed_live_text)
         prompt_docs = KnowledgeStore.format_for_prompt(retrieved_docs)
-        user_prompt = build_user_prompt(prompt_transcript, prompt_docs, action_type, effective_query)
+        user_prompt = build_user_prompt(
+            prompt_transcript, prompt_docs, action_type, effective_query, prompt_memory=prompt_mem
+        )
         prep_duration = time.monotonic() - t_start
 
         return PreparedCopilotRequest(
@@ -83,6 +91,7 @@ class MeetingAssistant:
             unconfirmed_live=unconfirmed_live_text,
             system_prompt=SYSTEM_PROMPT,
             user_prompt=user_prompt,
+            compacted_memory=compacted_mem,
             context_prep_duration=prep_duration,
             created_at=time.time(),
         )
@@ -109,6 +118,10 @@ class MeetingAssistant:
         english_ans, viet_meaning, evidence_lines, warnings = parse_copilot_response(raw_text)
 
         valid_segments = {f"T#{s.id}": s.text for s in prepared.all_segments}
+        if prepared.compacted_memory:
+            for itm in prepared.compacted_memory.all_items():
+                for sid in itm.source_ids:
+                    valid_segments.setdefault(f"T#{sid}", f"[Memory] {itm.text}")
         valid_docs = {d.chunk_id: f"{d.filename} > {d.heading}: {d.text[:90]}..." for d in prepared.retrieved_docs}
         cited_ids = extract_citations(raw_text)
         matched_citations, unverified_citations = match_citations(cited_ids, valid_segments, valid_docs)

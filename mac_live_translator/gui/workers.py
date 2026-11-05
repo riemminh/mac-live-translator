@@ -6,8 +6,12 @@ import threading
 from PySide6.QtCore import QThread, Signal
 
 from mac_live_translator.copilot.assistant import MeetingAssistant
+from mac_live_translator.copilot.client import ClaudeClient, ClaudeUsage
+from mac_live_translator.copilot.compactor import execute_claude_compaction
 from mac_live_translator.copilot.models import CopilotResult, PreparedCopilotRequest
 from mac_live_translator.knowledge.store import KnowledgeStore
+from mac_live_translator.meeting.context import MeetingContextStore
+from mac_live_translator.meeting.memory_store import CompactedMemoryStore
 
 
 class CopilotWorker(QThread):
@@ -77,3 +81,63 @@ class KnowledgeIndexWorker(QThread):
             self.indexing_done.emit(added, self.path)
         except Exception as exc:
             self.indexing_failed.emit(str(exc))
+
+
+class CompactionWorker(QThread):
+    """Background worker executing incremental meeting compaction via Claude."""
+    compaction_done = Signal(object, object)  # (MeetingMemory, ClaudeUsage)
+    compaction_failed = Signal(str)
+
+    def __init__(
+        self,
+        client: ClaudeClient,
+        memory_store: CompactedMemoryStore,
+        context_store: MeetingContextStore,
+        min_batch: int = 15,
+        force: bool = False,
+    ) -> None:
+        super().__init__()
+        self.client = client
+        self.memory_store = memory_store
+        self.context_store = context_store
+        self.min_batch = min_batch
+        self.force = force
+        self.stop_event = threading.Event()
+
+    def cancel(self) -> None:
+        """Signal compaction to abort."""
+        self.stop_event.set()
+        self.memory_store.cancel_in_progress()
+
+    def run(self) -> None:
+        """Execute compaction workflow safely off the main Qt thread."""
+        snapshot = self.memory_store.prepare_compaction_snapshot(
+            self.context_store, min_batch=self.min_batch, force=self.force
+        )
+        if snapshot is None:
+            self.compaction_failed.emit("Không có đoạn hội thoại đủ điều kiện để thu gọn.")
+            return
+
+        session_id, prev_mem, batch = snapshot
+        try:
+            updated_mem, usage = execute_claude_compaction(
+                client=self.client,
+                previous_memory=prev_mem,
+                batch=batch,
+                stop_event=self.stop_event,
+            )
+            if self.stop_event.is_set():
+                self.memory_store.cancel_in_progress()
+                return
+
+            max_batch_id = max(e.id for e in batch)
+            committed = self.memory_store.commit_compaction(session_id, updated_mem, max_batch_id)
+            if not committed:
+                self.compaction_failed.emit("Phiên họp đã thay đổi hoặc được thiết lập lại. Bỏ qua kết quả.")
+                return
+
+            self.compaction_done.emit(updated_mem, usage)
+        except Exception as exc:
+            self.memory_store.cancel_in_progress()
+            if not self.stop_event.is_set():
+                self.compaction_failed.emit(str(exc))

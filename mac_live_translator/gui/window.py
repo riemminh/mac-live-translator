@@ -22,9 +22,10 @@ from mac_live_translator.gui.theme import DARK_THEME_QSS
 from mac_live_translator.gui.top_bar import create_top_bar
 from mac_live_translator.gui.translation_events import handle_translation_event
 from mac_live_translator.gui.translation_panel import create_translation_panel
-from mac_live_translator.gui.workers import CopilotWorker, KnowledgeIndexWorker
+from mac_live_translator.gui.workers import CompactionWorker, CopilotWorker, KnowledgeIndexWorker
 from mac_live_translator.knowledge.store import KnowledgeStore
 from mac_live_translator.meeting.context import MeetingContextStore
+from mac_live_translator.meeting.memory_store import CompactedMemoryStore
 from mac_live_translator.pipeline.live import run as run_pipeline
 
 
@@ -46,10 +47,12 @@ class Window(QMainWindow):
 
         # Copilot subsystems
         self.context_store = MeetingContextStore(max_entries=1500)
+        self.memory_store = CompactedMemoryStore(protect_recent=30)
         self.knowledge_store = KnowledgeStore()
         self.claude_client = ClaudeClient(api_key=os.environ.get("ANTHROPIC_API_KEY", "").strip())
-        self.assistant = MeetingAssistant(self.context_store, self.knowledge_store, self.claude_client)
+        self.assistant = MeetingAssistant(self.context_store, self.knowledge_store, self.claude_client, self.memory_store)
         self.copilot_worker: CopilotWorker | None = None
+        self.compaction_worker: CompactionWorker | None = None
         self.indexing_workers: set[KnowledgeIndexWorker] = set()
         self.copilot_generation_id = 0
         self.last_prepared_request = None
@@ -135,12 +138,15 @@ class Window(QMainWindow):
         if hasattr(self, "listening_badge"):
             self.listening_badge.setText("🟢 Đang nghe (Listening)")
         self.context_store.clear()
+        self.memory_store.clear()
         self.copilot_actions.update_context_status()
         self.copilot_generation_id += 1
         self.last_prepared_request = None
         if self.copilot_worker and self.copilot_worker.isRunning():
             self.copilot_worker.cancel()
             self.copilot_actions.reset_copilot_buttons()
+        if self.compaction_worker and self.compaction_worker.isRunning():
+            self.compaction_worker.cancel()
 
         in_id, out_id = self.input.currentData(), self.output.currentData()
         in_name, out_name = sd.query_devices(in_id)["name"], sd.query_devices(out_id)["name"]
@@ -178,6 +184,9 @@ class Window(QMainWindow):
         if self.copilot_worker and self.copilot_worker.isRunning():
             self.copilot_worker.cancel()
             self.copilot_worker.wait(1000)
+        if self.compaction_worker and self.compaction_worker.isRunning():
+            self.compaction_worker.cancel()
+            self.compaction_worker.wait(1000)
         for kw in list(self.indexing_workers):
             if kw.isRunning():
                 kw.wait(1000)

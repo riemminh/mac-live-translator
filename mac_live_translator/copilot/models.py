@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from mac_live_translator.copilot.client import ClaudeUsage
 from mac_live_translator.knowledge.models import DocumentChunk
 from mac_live_translator.meeting.models import DetectedQuestion, TranscriptEntry
+
+if TYPE_CHECKING:
+    from mac_live_translator.meeting.memory_models import MeetingMemory
 
 
 @dataclass(frozen=True)
@@ -22,6 +26,7 @@ class PreparedCopilotRequest:
     unconfirmed_live: str
     system_prompt: str
     user_prompt: str
+    compacted_memory: MeetingMemory | None = None
     context_prep_duration: float = 0.0
     created_at: float = 0.0
 
@@ -40,4 +45,3 @@ class CopilotResult:
     retrieved_segments: list[TranscriptEntry] = field(default_factory=list)
     retrieved_docs: list[DocumentChunk] = field(default_factory=list)
     prepared_request: PreparedCopilotRequest | None = None
-

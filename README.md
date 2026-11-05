@@ -47,6 +47,7 @@ The redesigned PySide6 desktop interface combines live translation and on-demand
 - **Hero Spoken Reply**: Streamed spoken English text ready to be read aloud, with a one-click **Sao chép** (Copy) button.
 - **Vietnamese Meaning & Evidence**: Side-by-side translation of the reply and verified source citations (`[T#id]`, `[DOC#id]`).
 - **Knowledge & Context Chips**: Interactive chips to manage local Markdown/TXT documentation (SQLite FTS5) and review/clear meeting transcripts.
+- **Incremental Meeting Memory Compaction**: Automatically protects the latest 30 finalized segments in raw format while providing checkpointed semantic compaction for older discussions (preserving decisions, action items, questions, and risks with source segment IDs). Click the context chip to open the memory manager and trigger compaction.
 - **Source Preview & Privacy**: "Xem trước ngữ cảnh" displays the exact immutable prompt and excerpts before transmission. Cloud opt-in remains disabled by default.
 
 ---

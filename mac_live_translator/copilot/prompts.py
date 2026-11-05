@@ -39,17 +39,17 @@ def build_user_prompt(
     prompt_docs: str,
     action_type: str,
     effective_query: str,
+    prompt_memory: str = "",
 ) -> str:
-    """Compose untrusted transcript, documentation, and user question into a prompt."""
-    return f"""--- CURRENT MEETING TRANSCRIPT (UNTRUSTED SOURCE DATA) ---
-{prompt_transcript}
+    """Compose untrusted transcript, compacted memory, docs, and user request into a prompt."""
+    sections: list[str] = []
+    if prompt_memory.strip():
+        sections.append(f"--- COMPACTED MEETING MEMORY (HISTORICAL CONTEXT) ---\n{prompt_memory.strip()}")
 
---- LOCAL DOCUMENTATION EXCERPTS (UNTRUSTED SOURCE DATA) ---
-{prompt_docs}
-
---- USER REQUEST ---
-Action: {action_type}
-Question / Focus: {effective_query}
-
-Provide a concise, spoken English answer (1 to 3 short sentences), Vietnamese translation, and citations."""
-
+    sections.append(f"--- CURRENT MEETING TRANSCRIPT (UNTRUSTED SOURCE DATA) ---\n{prompt_transcript}")
+    sections.append(f"--- LOCAL DOCUMENTATION EXCERPTS (UNTRUSTED SOURCE DATA) ---\n{prompt_docs}")
+    sections.append(
+        f"--- USER REQUEST ---\nAction: {action_type}\nQuestion / Focus: {effective_query}\n\n"
+        "Provide a concise, spoken English answer (1 to 3 short sentences), Vietnamese translation, and citations."
+    )
+    return "\n\n".join(sections)

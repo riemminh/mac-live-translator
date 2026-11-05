@@ -77,15 +77,14 @@ def open_knowledge_dialog(win: Window) -> None:
     layout.addWidget(txt)
 
     btn_row = QHBoxLayout()
-    btn_add_file = QPushButton("+ Thêm tệp")
-    btn_add_file.clicked.connect(lambda: (add_knowledge_file_dialog(win, win.copilot_actions.index_knowledge_path), dlg.accept()))
-    btn_add_dir = QPushButton("+ Thêm thư mục")
-    btn_add_dir.clicked.connect(lambda: (add_knowledge_folder_dialog(win, win.copilot_actions.index_knowledge_path), dlg.accept()))
-    btn_clear = QPushButton("Xóa tất cả")
-    btn_clear.clicked.connect(lambda: (win.copilot_actions.clear_knowledge(), dlg.accept()))
-    btn_row.addWidget(btn_add_file)
-    btn_row.addWidget(btn_add_dir)
-    btn_row.addWidget(btn_clear)
+    for text, action in [
+        ("+ Thêm tệp", lambda: add_knowledge_file_dialog(win, win.copilot_actions.index_knowledge_path)),
+        ("+ Thêm thư mục", lambda: add_knowledge_folder_dialog(win, win.copilot_actions.index_knowledge_path)),
+        ("Xóa tất cả", win.copilot_actions.clear_knowledge),
+    ]:
+        btn = QPushButton(text)
+        btn.clicked.connect(lambda _, a=action: (a(), dlg.accept()))
+        btn_row.addWidget(btn)
     layout.addLayout(btn_row)
     dlg.exec()
 
@@ -125,10 +124,11 @@ def review_context_snapshot_dialog(win: Window) -> None:
     else:
         sections.append(f"[CÂU HỎI / YÊU CẦU]: {prepared.effective_query}\n")
 
+    mem_tag = f" | TRÍ NHỚ: {prepared.compacted_memory.total_items_count()} mục" if prepared.compacted_memory and not prepared.compacted_memory.is_empty() else ""
     sections.append(
         f"[BIÊN BẢN GẦN NHẤT: {len(prepared.recent_segments)} câu | "
         f"LỊCH SỬ CŨ: {len(prepared.older_segments)} câu | "
-        f"TÀI LIỆU: {len(prepared.retrieved_docs)} đoạn | "
+        f"TÀI LIỆU: {len(prepared.retrieved_docs)} đoạn{mem_tag} | "
         f"Chuẩn bị: {prepared.context_prep_duration * 1000:.1f}ms]"
     )
     sections.append("\n" + "=" * 60 + "\nNỘI DUNG PROMPT HOÀN CHỈNH SẼ GỬI LÊN CLAUDE:\n" + "=" * 60)
