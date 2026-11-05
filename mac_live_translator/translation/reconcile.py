@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import time
 from collections import deque
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from mac_live_translator.asr.stability import tokens
 from mac_live_translator.pipeline.metrics import trace
 from mac_live_translator.translation.models import Segment
 from mac_live_translator.translation.policy import is_risky_boundary
-from mac_live_translator.translation.scheduler import TranslationScheduler
+
+if TYPE_CHECKING:
+    from mac_live_translator.translation.scheduler import TranslationScheduler
 
 
 def check_should_reconcile(seg: Segment) -> bool:
@@ -29,6 +31,7 @@ def maybe_finalize(
     recent_final_en: deque[str],
     emit: Callable[[str, dict], None],
     reconciled_text: str | None = None,
+    speech_pipe: object = None,
 ) -> None:
     """Finalize a completed segment and emit coverage and final Vietnamese subtitle events."""
     with scheduler.cv:
@@ -71,4 +74,3 @@ def maybe_finalize(
             "latency": time.monotonic() - seg.started,
             "is_filler": is_fill,
         })
-

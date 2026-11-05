@@ -39,6 +39,7 @@ class Config:
     speak: bool = False
     max_lag: float = DEFAULT_MAX_LAG
     output_identity: str = ""
+    fast_preview: bool = True
 
 
 def load_local_env() -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import threading
 
 
 @dataclass(eq=False)
@@ -18,6 +19,17 @@ class Fragment:
     request_start_at: float = 0.0
     first_token_at: float = 0.0
     done_at: float = 0.0
+
+
+@dataclass
+class SpeculativeJob:
+    """A provisional preview translation candidate for uncommitted English speech."""
+    segment_id: int
+    revision: int
+    english: list[str]
+    context: str
+    created_at: float
+    cancel_event: threading.Event = field(default_factory=threading.Event)
 
 
 @dataclass
@@ -41,4 +53,6 @@ class Segment:
     finished: bool = False
     reconciled: bool = False
     is_filler: bool = False
+    spoken: bool = False
+    spoken_fragment_ids: set[int] = field(default_factory=set)
 

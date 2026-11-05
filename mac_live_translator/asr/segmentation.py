@@ -7,7 +7,7 @@ import queue
 import threading
 import time
 from collections import deque
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 import numpy as np
 import scipy.signal
@@ -19,7 +19,10 @@ from mac_live_translator.pipeline.metrics import trace
 from mac_live_translator.translation.models import Fragment, Segment
 from mac_live_translator.translation.policy import UNSAFE_ENDINGS, is_filler
 from mac_live_translator.translation.reconcile import maybe_finalize
-from mac_live_translator.translation.scheduler import TranslationScheduler
+from mac_live_translator.translation.speculative import select_speculative_candidate
+
+if TYPE_CHECKING:
+    from mac_live_translator.translation.scheduler import TranslationScheduler
 
 
 def run_asr_worker(
@@ -33,20 +36,14 @@ def run_asr_worker(
 ) -> None:
     """Read captured audio blocks, segment by speech/pause boundaries, and decode via MLX Whisper."""
     audio: deque[np.ndarray] = deque()
-    samples = 0
-    active = False
+    samples = active = decoded_samples = last_voiced_sample = decoded_voiced_sample = number = last_seq = 0
     seg: Segment | None = None
-    last_voice = 0.0
-    last_decode = 0.0
-    decoded_samples = 0
-    last_voiced_sample = 0
-    decoded_voiced_sample = 0
-    number = 0
-    last_seq = 0
+    last_voice = last_decode = last_spec_at = 0.0
+    last_spec: list[str] = []
     rate = cfg.sample_rate
 
     def decode(final: bool) -> None:
-        nonlocal last_decode, decoded_samples, decoded_voiced_sample
+        nonlocal last_decode, decoded_samples, decoded_voiced_sample, last_spec, last_spec_at
         assert seg is not None
         if samples < int(0.45 * rate):
             return
@@ -79,7 +76,6 @@ def run_asr_worker(
                 seg.final_english = text
                 frag = None
                 if remainder and len(seg.fragments) == 1 and seg.fragments[0].status == "queued":
-                    seg.fragments[0].english = current
                     seg.fragments[0].english = current
                     seg.revision += 1
                     revision = seg.revision
@@ -122,20 +118,29 @@ def run_asr_worker(
         with scheduler.cv:
             prefix = scheduler.committed_words(seg)
         pending = stable_words[len(prefix):]
-        if len(pending) < 4:
-            return
-        cut = min(len(pending), 8)
-        boundaries = [i + 1 for i, word in enumerate(pending[:cut]) if i >= 3 and word.endswith((",", ";", ":", ".", "?", "!"))]
-        if boundaries:
-            cut = boundaries[-1]
-        elif cut == len(pending) and not pending[-1].endswith((".", "?", "!")):
-            cut -= 1
-        while cut > 0 and key(pending[cut - 1]) in UNSAFE_ENDINGS:
-            cut -= 1
-        candidate = pending[:cut]
-        if len(candidate) >= 4 and len({key(word) for word in candidate}) >= 3:
+
+        candidate = None
+        if len(pending) >= 4:
+            cut = min(len(pending), 8)
+            boundaries = [i + 1 for i, w in enumerate(pending[:cut]) if i >= 3 and w.endswith((",", ";", ":", ".", "?", "!"))]
+            if boundaries:
+                cut = boundaries[-1]
+            elif cut == len(pending) and not pending[-1].endswith((".", "?", "!")):
+                cut -= 1
+            while cut > 0 and key(pending[cut - 1]) in UNSAFE_ENDINGS:
+                cut -= 1
+            if cut >= 4 and len({key(w) for w in pending[:cut]}) >= 3:
+                candidate = pending[:cut]
+
+        if candidate:
             trace(emit, seg, "eligible", stable_wait=now - seg.stable_since)
             scheduler.enqueue(seg, candidate, scheduler.build_context(recent_final_en, prefix), dropped, emit)
+        elif cfg.fast_preview:
+            spec = select_speculative_candidate(seg, current, prefix, last_spec, last_spec_at, now)
+            if spec:
+                last_spec = spec
+                last_spec_at = now
+                scheduler.set_speculative(seg, spec, scheduler.build_context(recent_final_en, prefix))
 
     while not stop.is_set():
         try:
@@ -151,19 +156,21 @@ def run_asr_worker(
                     scheduler.purge_obsolete_jobs()
                 emit("vietnamese_cancelled", {"id": seg.id})
             audio.clear()
-            samples = 0
-            active = False
+            samples = active = decoded_samples = last_voiced_sample = decoded_voiced_sample = 0
             seg = None
-            decoded_samples = last_voiced_sample = decoded_voiced_sample = 0
+            scheduler.active_speaking = False
         last_seq = current_seq
         mono = block.mean(axis=1).astype(np.float32)
         rms = float(np.sqrt(np.mean(np.square(mono, dtype=np.float64))))
         voiced = math.isfinite(rms) and rms >= cfg.min_rms
         if voiced and not active:
-            active = True
+            active = 1
             number += 1
             seg = Segment(number, stamp)
             last_decode = stamp
+            scheduler.active_speaking = True
+            last_spec = []
+            last_spec_at = 0.0
         if not active:
             continue
         assert seg is not None
@@ -181,8 +188,7 @@ def run_asr_worker(
         if (samples >= int(1.2 * rate) and pause >= boundary) or samples >= int(7 * rate):
             decode(True)
             audio.clear()
-            samples = 0
-            active = False
+            samples = active = decoded_samples = last_voiced_sample = decoded_voiced_sample = 0
             seg = None
-            decoded_samples = last_voiced_sample = decoded_voiced_sample = 0
-
+            scheduler.active_speaking = False
+            last_spec = []

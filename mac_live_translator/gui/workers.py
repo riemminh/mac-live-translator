@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 from PySide6.QtCore import QThread, Signal
 
+from mac_live_translator.context_service.engine import ContextEngine
 from mac_live_translator.copilot.assistant import MeetingAssistant
 from mac_live_translator.copilot.client import ClaudeClient, ClaudeUsage
 from mac_live_translator.copilot.compactor import execute_claude_compaction
@@ -141,3 +142,37 @@ class CompactionWorker(QThread):
             self.memory_store.cancel_in_progress()
             if not self.stop_event.is_set():
                 self.compaction_failed.emit(str(exc))
+
+
+class UnderstandingAnalysisWorker(QThread):
+    """Background worker executing single-pass Claude understanding analysis."""
+    analysis_done = Signal(object)
+    analysis_failed = Signal(str)
+
+    def __init__(
+        self,
+        engine: ContextEngine,
+        session_id: str = "default",
+        force: bool = False,
+    ) -> None:
+        super().__init__()
+        self.engine = engine
+        self.session_id = session_id
+        self.force = force
+        self.stop_event = threading.Event()
+
+    def cancel(self) -> None:
+        self.stop_event.set()
+
+    def run(self) -> None:
+        try:
+            result = self.engine.trigger_analysis(
+                session_id=self.session_id,
+                force=self.force,
+                stop_event=self.stop_event,
+            )
+            if not self.stop_event.is_set() and result is not None:
+                self.analysis_done.emit(result)
+        except Exception as exc:
+            if not self.stop_event.is_set():
+                self.analysis_failed.emit(str(exc))

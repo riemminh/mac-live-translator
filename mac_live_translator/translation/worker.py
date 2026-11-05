@@ -1,18 +1,16 @@
-"""Translation consumer worker executing streaming fragment and reconciliation jobs."""
+"""Translation consumer worker executing streaming fragment, speculative preview, and reconciliation jobs."""
 
 from __future__ import annotations
 
 import threading
-import time
 from collections import deque
 from typing import Callable
 
 from mac_live_translator.config import Config
-from mac_live_translator.pipeline.metrics import trace
-from mac_live_translator.translation.models import Fragment, Segment
-from mac_live_translator.translation.ollama import translate, translate_stream
-from mac_live_translator.translation.reconcile import check_should_reconcile, maybe_finalize
+from mac_live_translator.translation.models import Fragment, Segment, SpeculativeJob
 from mac_live_translator.translation.scheduler import TranslationScheduler
+from mac_live_translator.translation.speculative_worker import execute_speculative_job
+from mac_live_translator.translation.worker_jobs import execute_fragment_job, execute_reconcile_job
 
 
 def run_translation_worker(
@@ -22,155 +20,57 @@ def run_translation_worker(
     stop: threading.Event,
     dropped: dict[str, int],
     recent_final_en: deque[str],
+    speech_pipe: object = None,
 ) -> None:
-    """Consume translation queue jobs with anti-starvation policy and streaming output."""
-    consecutive_high = 0
-
+    """Consume translation queue jobs with strict live speech priority and fast speculative preview."""
     while not stop.is_set():
+        job_kind: str | None = None
+        seg: Segment | None = None
+        frag: Fragment | None = None
+        rec_text: str | None = None
+        spec_job: SpeculativeJob | None = None
+
         with scheduler.cv:
-            while not stop.is_set() and not scheduler.high_jobs and not scheduler.low_jobs:
+            while not stop.is_set() and not scheduler.high_jobs and not scheduler.speculative_job and not scheduler.low_jobs:
                 scheduler.cv.wait(timeout=0.2)
             if stop.is_set():
                 break
 
-            now = time.monotonic()
-            starved_reconcile = scheduler.low_jobs and (
-                now - scheduler.low_jobs[0][2] >= 2.0 or consecutive_high >= 3
-            )
-
-            if (starved_reconcile or not scheduler.high_jobs) and scheduler.low_jobs:
-                job_kind = "reconcile"
-                seg, rec_text, rec_queued_at = scheduler.low_jobs.pop(0)
-                consecutive_high = 0
-                valid = not seg.finished and not seg.reconciled
-            else:
+            # Priority 1: Required stable/final speech fragments
+            if scheduler.high_jobs:
                 job_kind = "fragment"
                 seg, frag = scheduler.high_jobs.pop(0)
-                consecutive_high += 1
                 valid = frag in seg.fragments and not seg.finished
 
+            # Priority 2: Early speculative Vietnamese preview (if enabled)
+            elif cfg.fast_preview and scheduler.speculative_job is not None:
+                job_kind = "speculative"
+                spec_job = scheduler.speculative_job
+                scheduler.speculative_job = None
+                scheduler.active_speculative_cancel = spec_job.cancel_event
+                valid = not spec_job.cancel_event.is_set()
+
+            # Priority 3: Non-urgent reconciliation (only when inference queue is idle)
+            elif scheduler.low_jobs and not scheduler.active_speaking:
+                job_kind = "reconcile"
+                seg, rec_text, _ = scheduler.low_jobs.pop(0)
+                valid = not seg.finished and not seg.reconciled
+            else:
+                valid = False
+
         if not valid:
-            dropped["translation"] += 1
             continue
 
-        if job_kind == "reconcile":
-            trace(emit, seg, "reconciliation_start")
+        if job_kind == "fragment" and seg is not None and frag is not None:
+            execute_fragment_job(cfg, scheduler, seg, frag, emit, stop, dropped, recent_final_en, speech_pipe)
+
+        elif job_kind == "speculative" and spec_job is not None:
             try:
-                rec_result = translate(rec_text, cfg.translation_model)
-            except Exception as exc:
-                emit("translation_delayed", {"id": seg.id, "reason": f"reconciliation failed: {exc}"})
-                maybe_finalize(seg, scheduler, recent_final_en, emit)
-                continue
-            with scheduler.cv:
-                if seg.finished:
-                    continue
-                seg.reconciled = True
-                for f in seg.fragments:
-                    f.status = "done"
-            trace(emit, seg, "reconciliation_done")
-            maybe_finalize(seg, scheduler, recent_final_en, emit, reconciled_text=rec_result)
-            continue
+                execute_speculative_job(cfg, scheduler, spec_job, emit, stop)
+            finally:
+                with scheduler.cv:
+                    if scheduler.active_speculative_cancel is spec_job.cancel_event:
+                        scheduler.active_speculative_cancel = None
 
-        # Fragment translation
-        now = time.monotonic()
-        with scheduler.cv:
-            if frag not in seg.fragments or seg.finished:
-                dropped["translation"] += 1
-                continue
-            frag.dequeued_at = now
-            frag.status = "translating"
-        trace(emit, seg, "dequeued", fragment_id=frag.id, wait=now - frag.queued_at)
-
-        cancel = threading.Event()
-        last_update = 0.0
-
-        def request_start() -> None:
-            t = time.monotonic()
-            frag.request_start_at = t
-            trace(emit, seg, "ollama_request_start", fragment_id=frag.id, wait=t - frag.dequeued_at)
-
-        def token(text: str) -> None:
-            nonlocal last_update
-            t_now = time.monotonic()
-            with scheduler.cv:
-                if frag not in seg.fragments:
-                    return
-                first = seg.first_vi_token_received_at is None
-                if first:
-                    seg.first_vi_token_received_at = t_now
-                if not frag.first_token_at:
-                    frag.first_token_at = t_now
-                previous_vi = " ".join(item.vietnamese for item in seg.fragments if item is not frag and item.status == "done")
-                revision = seg.revision
-            if first:
-                trace(emit, seg, "first_token_received", fragment_id=frag.id)
-            if first or t_now - last_update >= 0.05:
-                preview = " ".join(part for part in (previous_vi, text) if part).strip()
-                emit("vietnamese_partial", {
-                    "id": seg.id,
-                    "fragment_id": frag.id,
-                    "text": preview,
-                    "revision": revision,
-                    "latency": t_now - seg.started,
-                    "received_at": t_now,
-                    "is_filler": seg.is_filler,
-                })
-                last_update = t_now
-
-        req_start = time.monotonic()
-        result = translate_stream(
-            " ".join(frag.english),
-            cfg.translation_model,
-            token,
-            cancel,
-            on_request_start=request_start,
-            on_stats=lambda stats: emit("ollama_stats", {
-                "id": seg.id,
-                "fragment_id": frag.id,
-                "load_ms": stats.get("load_duration", 0) / 1_000_000,
-                "prompt_ms": stats.get("prompt_eval_duration", 0) / 1_000_000,
-                "eval_ms": stats.get("eval_duration", 0) / 1_000_000,
-            }),
-            context=frag.context,
-        )
-        done_time = time.monotonic()
-        frag.done_at = done_time
-
-        with scheduler.cv:
-            if frag not in seg.fragments or stop.is_set():
-                dropped["translation"] += 1
-                continue
-            frag.vietnamese = result
-            frag.status = "done"
-            preview = " ".join(item.vietnamese for item in seg.fragments if item.vietnamese)
-            revision = seg.revision
-
-        trace(emit, seg, "translation_done", fragment_id=frag.id, request_duration=done_time - (frag.request_start_at or req_start))
-        emit("vietnamese_partial", {
-            "id": seg.id,
-            "fragment_id": frag.id,
-            "text": preview.strip(),
-            "revision": revision,
-            "latency": (seg.first_vi_token_received_at or done_time) - seg.started,
-            "received_at": done_time,
-            "is_filler": seg.is_filler,
-        })
-
-        with scheduler.cv:
-            all_done = (
-                seg.final_english is not None
-                and seg.fragments
-                and all(f.status == "done" for f in seg.fragments)
-                and not seg.finished
-            )
-            should_reconcile = all_done and check_should_reconcile(seg)
-
-        if should_reconcile:
-            with scheduler.cv:
-                if not seg.reconciled and not seg.finished and not any(s is seg for s, _, _ in scheduler.low_jobs):
-                    scheduler.low_jobs.append((seg, seg.final_english, time.monotonic()))
-                    trace(emit, seg, "reconciliation_queued", queue_size=len(scheduler.low_jobs))
-                    scheduler.cv.notify()
-        else:
-            maybe_finalize(seg, scheduler, recent_final_en, emit)
-
+        elif job_kind == "reconcile" and seg is not None and rec_text is not None:
+            execute_reconcile_job(cfg, scheduler, seg, rec_text, emit, recent_final_en, speech_pipe)

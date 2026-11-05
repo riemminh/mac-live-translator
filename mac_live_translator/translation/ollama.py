@@ -13,6 +13,11 @@ from mac_live_translator.config import OLLAMA_URL
 from mac_live_translator.translation.policy import IT_GLOSSARY
 
 
+class TranslationCancelled(Exception):
+    """Raised when an in-flight translation request was intentionally aborted."""
+    pass
+
+
 def check_ollama(model: str) -> None:
     """Verify that local Ollama daemon is reachable and the translation model is installed."""
     try:
@@ -67,7 +72,10 @@ def translate_stream(
     on_stats: Callable[[dict], None] | None = None,
     context: str = "",
 ) -> str:
-    """Stream translation tokens incrementally from Ollama."""
+    """Stream translation tokens incrementally from Ollama with cooperative cancellation."""
+    if stop.is_set():
+        raise TranslationCancelled("Request cancelled before start")
+
     system = (
         "Translate spoken English (en) into natural Vietnamese (vi) for an IT meeting. "
         f"{IT_GLOSSARY} "
@@ -80,6 +88,7 @@ def translate_stream(
         f"New English fragment: {text}"
     )
 
+    parts: list[str] = []
     with requests.Session() as session:
         session.trust_env = False
         if on_request_start:
@@ -100,16 +109,19 @@ def translate_stream(
             timeout=(5, 45),
         ) as response:
             response.raise_for_status()
-            parts: list[str] = []
             for line in response.iter_lines():
                 if stop.is_set():
-                    break
+                    try:
+                        response.close()
+                    except Exception:
+                        pass
+                    raise TranslationCancelled("Request cancelled during streaming")
                 if not line:
                     continue
                 data = json.loads(line)
-                token = data.get("message", {}).get("content", "")
-                if token:
-                    parts.append(token)
+                tok = data.get("message", {}).get("content", "")
+                if tok:
+                    parts.append(tok)
                     visible = "".join(parts)
                     if visible.strip():
                         on_token(visible)
@@ -122,4 +134,3 @@ def translate_stream(
     if not stop.is_set() and (not result or "<think>" in result.casefold() or len(result) > 1000):
         raise RuntimeError("Ollama returned an empty or unexpected translation.")
     return result
-
