@@ -147,3 +147,4 @@ def create_understanding_panel(window: Window) -> QWidget:
     layout.addWidget(compact_sub)
 
     return panel
+

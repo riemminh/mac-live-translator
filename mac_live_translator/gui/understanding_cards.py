@@ -108,3 +108,4 @@ class CompactDecisionWidget(QFrame):
             src_lbl = QLabel(f"[{', '.join(f'T#{i}' for i in srcs[:2])}]")
             src_lbl.setStyleSheet("color: #64748b; font-size: 9px; font-family: monospace;")
             layout.addWidget(src_lbl)
+

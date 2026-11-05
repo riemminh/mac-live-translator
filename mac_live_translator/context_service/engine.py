@@ -184,3 +184,4 @@ class ContextEngine:
         if not session:
             return []
         return session.fts_store.search(query=query, top_k=top_k)
+

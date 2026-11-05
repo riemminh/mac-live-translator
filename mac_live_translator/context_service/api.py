@@ -133,3 +133,4 @@ def create_app(engine: ContextEngine | None = None) -> FastAPI:
     app = FastAPI(title="Meeting Understanding Context Service", version="1.0.0")
     app.include_router(router)
     return app
+

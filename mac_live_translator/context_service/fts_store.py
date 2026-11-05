@@ -139,3 +139,4 @@ class SessionFTSStore:
                     break
 
         return results
+

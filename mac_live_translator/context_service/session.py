@@ -129,3 +129,4 @@ class SessionContext:
                 new_memory=merged_mem,
                 max_batch_id=max(batch_ids) if batch_ids else 0,
             )
+

@@ -195,3 +195,4 @@ class UnderstandingController:
             w = item.widget()
             if w:
                 w.deleteLater()
+

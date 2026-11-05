@@ -64,3 +64,4 @@ def build_analysis_user_prompt(
     sections.append(f"--- CURRENT FINALIZED ENGLISH BATCH (UNTRUSTED SOURCE DATA) ---\n{batch_text.strip()}")
     sections.append("Analyze the current batch and produce the structured Vietnamese JSON output according to system rules.")
     return "\n\n".join(sections)
+

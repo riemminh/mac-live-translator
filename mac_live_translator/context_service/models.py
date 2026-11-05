@@ -119,3 +119,4 @@ class SearchResult:
             "wall_at": self.wall_at,
             "score": self.score,
         }
+

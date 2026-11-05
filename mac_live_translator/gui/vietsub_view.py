@@ -156,3 +156,4 @@ def create_vietsub_view(window: Window) -> QWidget:
     layout.addWidget(hist_card, 1)
 
     return container
+
